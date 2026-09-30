@@ -1,0 +1,25 @@
+{
+  "name": "cern-inspire-mcp-server",
+  "version": "0.1.0",
+  "description": "CERN and high-energy physics literature, experiments, HEPData measurement tables, and author citation metrics from INSPIRE.",
+  "author": {
+    "name": "cyanheads",
+    "email": "casey@caseyjhand.com",
+    "url": "https://github.com/cyanheads"
+  },
+  "homepage": "https://github.com/cyanheads/cern-inspire-mcp-server#readme",
+  "repository": "https://github.com/cyanheads/cern-inspire-mcp-server",
+  "license": "Apache-2.0",
+  "keywords": ["mcp", "mcp-server", "model-context-protocol", "cern", "inspire", "inspirehep", "hepdata", "high-energy-physics", "particle-physics", "citations"],
+  "mcpServers": "./.codex-plugin/mcp.json",
+  "interface": {
+    "displayName": "cern-inspire-mcp-server",
+    "shortDescription": "High-energy physics literature, experiments, and HEPData tables from INSPIRE.",
+    "longDescription": "Search particle physics papers on INSPIRE by keyword, SPIRES query, arXiv ID, or DOI, and read full records with authors, affiliations, and collaborations. Look up author profiles and HEP citation metrics, inspect collider and detector experiments, and pull the numerical measurement tables published with a paper from HEPData. Both upstream APIs are keyless.",
+    "developerName": "cyanheads",
+    "category": "Research",
+    "capabilities": ["Read"],
+    "websiteURL": "https://github.com/cyanheads/cern-inspire-mcp-server",
+    "defaultPrompt": []
+  }
+}

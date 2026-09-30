@@ -1,0 +1,9 @@
+{
+  "cern-inspire-mcp-server": {
+    "command": "npx",
+    "args": ["-y", "@cyanheads/cern-inspire-mcp-server"],
+    "env": {
+      "MCP_TRANSPORT_TYPE": "stdio"
+    }
+  }
+}

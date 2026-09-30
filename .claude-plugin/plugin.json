@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "cern-inspire-mcp-server",
+  "version": "0.1.0",
+  "description": "CERN and high-energy physics literature, experiments, HEPData measurement tables, and author citation metrics from INSPIRE.",
+  "author": {
+    "name": "cyanheads",
+    "email": "casey@caseyjhand.com",
+    "url": "https://github.com/cyanheads"
+  },
+  "homepage": "https://github.com/cyanheads/cern-inspire-mcp-server#readme",
+  "repository": "https://github.com/cyanheads/cern-inspire-mcp-server",
+  "license": "Apache-2.0",
+  "keywords": ["mcp", "mcp-server", "model-context-protocol", "cern", "inspire", "inspirehep", "hepdata", "high-energy-physics", "particle-physics", "citations"],
+  "mcpServers": {
+    "cern-inspire-mcp-server": {
+      "command": "npx",
+      "args": ["-y", "@cyanheads/cern-inspire-mcp-server"],
+      "env": {
+        "MCP_TRANSPORT_TYPE": "stdio"
+      }
+    }
+  }
+}
