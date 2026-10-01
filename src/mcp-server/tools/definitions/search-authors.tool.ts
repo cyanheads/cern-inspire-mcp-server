@@ -124,6 +124,28 @@ const ZERO_HIT_HINTS: Record<AuthorMatch, string> = {
     'Author and literature records are numbered separately, so a paper recid matches no profile; search by name instead.',
 };
 
+/** Name parts folded for comparison: accents and case dropped, punctuation splits parts. */
+const nameParts = (text: string): string[] =>
+  text
+    .normalize('NFD')
+    .replace(/\p{M}/gu, '')
+    .toLowerCase()
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter(Boolean);
+
+/**
+ * True when some profile's family name (its `name` before the comma) appears as
+ * a run of the query's name parts. The run may sit anywhere in the query, since
+ * a free-text name arrives as "Last, First", "First Last", or a bare surname.
+ */
+function carriesQueriedSurname(query: string, authors: readonly { name: string }[]): boolean {
+  const queryParts = nameParts(query).join(' ');
+  return authors.some((a) => {
+    const family = nameParts(a.name.split(',')[0] ?? '').join(' ');
+    return family !== '' && ` ${queryParts} `.includes(` ${family} `);
+  });
+}
+
 function renderPosition(p: PositionOutput): string {
   const span =
     p.startDate || p.endDate
@@ -299,12 +321,25 @@ export const searchAuthorsTool = tool('cern_inspire_search_authors', {
       );
     }
 
-    if (result.total > shown + result.deletedDropped) {
+    const truncated = result.total > shown + result.deletedDropped;
+    if (truncated) {
       notices.unshift(
         input.limit < MAX_LIMIT
           ? `More profiles matched; raise limit (max ${MAX_LIMIT}), add name parts, or search by BAI or ORCID to pin one person.`
           : 'More profiles matched than the 25 returned; add name parts, or search by BAI or ORCID to pin one person.',
       );
+    }
+    if (
+      result.matchedAs === 'name' &&
+      shown > 0 &&
+      !carriesQueriedSurname(input.query, result.authors)
+    ) {
+      notices.unshift(
+        `No profile on this page has a surname in "${inline(input.query)}"; INSPIRE widened the match by reading name parts as initials, so these may be other people. Check the spelling, or search by BAI or ORCID.`,
+      );
+    }
+
+    if (truncated) {
       ctx.enrich.truncated({ shown, cap: input.limit, guidance: notices.join(' ') });
     } else if (notices.length > 0) {
       ctx.enrich.notice(notices.join(' '));

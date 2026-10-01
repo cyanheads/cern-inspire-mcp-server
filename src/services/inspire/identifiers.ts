@@ -22,9 +22,11 @@ export const PAPER_ID_PATTERN =
  * Reduces the accepted spellings of a paper identifier to its bare form: trims,
  * maps arxiv.org, doi.org, inspirehep.net literature, and hepdata.net record URLs
  * to the identifier they carry, strips `arXiv:` / `doi:` prefixes (and any space after them) and HEPData's
- * `ins` prefix, and drops an arXiv version suffix (INSPIRE matches `1207.7214`,
- * not `1207.7214v2`). Every mapping is one-to-one; anything else passes through
- * for the pattern check to reject.
+ * `ins` prefix, lower-cases an old-style arXiv archive (`HEP-TH/9711200` →
+ * `hep-th/9711200`, the subject class of `math.AG/0601001` kept as written), and
+ * drops an arXiv version suffix (INSPIRE matches `1207.7214`, not `1207.7214v2`).
+ * Every mapping is one-to-one; anything else passes through for the pattern
+ * check to reject.
  */
 export function normalizePaperId(raw: string): string {
   let id = raw.trim();
@@ -41,6 +43,9 @@ export function normalizePaperId(raw: string): string {
   );
   id = id.replace(/^https?:\/\/(?:www\.)?hepdata\.net\/record\/ins(\d+)\/?(?:[?#].*)?$/i, '$1');
   id = id.replace(/^ins(\d+)$/i, '$1');
+  id = id.replace(/^[A-Za-z-]+(?=(?:\.[A-Za-z]{2})?\/\d{7}(?:v\d+)?$)/, (archive) =>
+    archive.toLowerCase(),
+  );
   id = id.replace(/^(\d{4}\.\d{4,5})v\d+$/, '$1');
   id = id.replace(/^([a-z-]+(?:\.[A-Z]{2})?\/\d{7})v\d+$/, '$1');
   return id;

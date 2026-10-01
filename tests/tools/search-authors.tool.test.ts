@@ -389,6 +389,111 @@ describe('zero-hit notice', () => {
   });
 });
 
+describe('surname-miss notice', () => {
+  const named = (n: number, value: string) => author(n, { name: { value } });
+
+  const surnameMiss = (query: string) =>
+    `No profile on this page has a surname in "${query}"; INSPIRE widened the match by reading name parts as initials, so these may be other people. Check the spelling, or search by BAI or ORCID.`;
+
+  it('flags a misspelled surname whose page holds only namesakes-by-initial, ahead of the more-matched line', async () => {
+    routePage(
+      authorPage([named(1, 'Magana, Juan'), named(2, 'Mendez, Juan'), named(3, 'Luo, Juan-juan')], {
+        total: 251_959,
+      }),
+    );
+
+    const result = await run({ query: 'Maldecena, Juan', limit: 3 });
+
+    const out = structured<Output>(result);
+    expect(out.authors.map((a) => a.name)).toEqual([
+      'Magana, Juan',
+      'Mendez, Juan',
+      'Luo, Juan-juan',
+    ]);
+    expect(out).toMatchObject({ matchedAs: 'name', truncated: true, totalCount: 251_959 });
+    expect(out.notice).toBe(
+      `${surnameMiss('Maldecena, Juan')} More profiles matched; raise limit (max 25), add name parts, or search by BAI or ORCID to pin one person.`,
+    );
+    expect(fullText(result)).toContain(
+      'INSPIRE widened the match by reading name parts as initials',
+    );
+  });
+
+  it('flags a name without a comma whose parts are no returned surname', async () => {
+    routePage(
+      authorPage([
+        named(1, 'Quílez Lasanta, Pablo'),
+        named(2, 'Qiao, Qing-Peng'),
+        named(3, 'Potosí, Quray'),
+      ]),
+    );
+
+    const out = structured<Output>(await run({ query: 'Qzxwvbnm Plkjhgf' }));
+
+    expect(out).toMatchObject({ truncated: false, shown: 3 });
+    expect(out.notice).toBe(surnameMiss('Qzxwvbnm Plkjhgf'));
+  });
+
+  it('does not count a surname that the query only begins', async () => {
+    routePage(authorPage([named(1, 'Maldacena, Juan')]));
+
+    const out = structured<Output>(await run({ query: 'Maldacen, Juan' }));
+
+    expect(out.notice).toBe(surnameMiss('Maldacen, Juan'));
+  });
+
+  it.each([
+    ['"Last, First"', 'Maldacena, Juan', 'Maldacena, Juan Martin'],
+    ['"First Last"', 'Juan Martin Maldacena', 'Maldacena, Juan Martin'],
+    ['surname first without a comma', 'Maldacena Juan', 'Maldacena, Juan Martin'],
+    ['an initial', 'J. Maldacena', 'Maldacena, Juan Martin'],
+    ['a bare surname in capitals', 'MALDACENA', 'Maldacena, Juan Martin'],
+    ['accents the query leaves out', 'Quilez Lasanta, Pablo', 'Quílez Lasanta, Pablo'],
+    ['accents the profile leaves out', 'Pötosi', 'Potosi, Quray'],
+    ['a hyphen written as a space', 'Garcia Bellido, Juan', 'García-Bellido, Juan'],
+    ['a particle with an apostrophe', "Gerard 't Hooft", "'t Hooft, Gerard"],
+    ['a profile name without a comma', 'Jane Ghosh', 'Ghosh'],
+  ])(
+    'sets no surname notice when one profile carries the surname: %s',
+    async (_label, query, name) => {
+      routePage(authorPage([named(1, 'Mendez, Juan'), named(2, name)]));
+
+      const out = structured<Output>(await run({ query }));
+
+      expect(out.authors).toHaveLength(2);
+      expect(out.notice).toBeUndefined();
+    },
+  );
+
+  it('leaves identifier routes alone, whatever names come back', async () => {
+    routePage(authorPage([named(1, 'Roe, Richard')]));
+
+    const out = structured<Output>(await run({ query: 'Jane.Doe.1' }));
+
+    expect(out.matchedAs).toBe('bai');
+    expect(out.notice).toBeUndefined();
+  });
+
+  it('never matches a profile with no name', async () => {
+    routePage(authorPage([{ control_number: 8 }]));
+
+    const out = structured<Output>(await run({ query: 'Doe, Jane' }));
+
+    expect(out.notice).toBe(surnameMiss('Doe, Jane'));
+  });
+
+  it('echoes the query through inline(): newlines flatten and brackets are escaped', async () => {
+    routePage(authorPage([named(1, 'Roe, Richard')]));
+
+    const result = await run({ query: 'Zz\r\n# injected\n[x](http://evil)' });
+
+    const text = structured<Output>(result).notice ?? '';
+    expect(text).not.toMatch(/[\r\n]/);
+    expect(text).toContain('"Zz # injected \\[x\\](http://evil)"');
+    expect(fullText(result)).not.toMatch(/^# injected/m);
+  });
+});
+
 describe('deleted profiles', () => {
   const deleted = (n: number) => author(n, { deleted: true });
 

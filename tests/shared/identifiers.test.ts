@@ -34,6 +34,14 @@ describe('normalizePaperId', () => {
     ['arXiv:hep-th/9711200', 'hep-th/9711200'],
     ['hep-th/9711200v3', 'hep-th/9711200'],
     ['math.AG/0601001v2', 'math.AG/0601001'],
+    // an old-style archive in upper case is lower-cased; the subject class is kept as written
+    ['HEP-TH/9711200', 'hep-th/9711200'],
+    ['Hep-Th/9711200', 'hep-th/9711200'],
+    ['arXiv:HEP-TH/9711200v2', 'hep-th/9711200'],
+    ['https://arxiv.org/abs/HEP-TH/9711200', 'hep-th/9711200'],
+    ['MATH.AG/0601001', 'math.AG/0601001'],
+    ['Math.AG/0601001v1', 'math.AG/0601001'],
+    ['math.ag/0601001', 'math.ag/0601001'],
     // arxiv.org URLs
     ['https://arxiv.org/abs/1207.7214', '1207.7214'],
     ['http://arxiv.org/abs/1207.7214', '1207.7214'],
@@ -93,8 +101,19 @@ describe('normalizePaperId', () => {
     expect(normalizePaperId('1207.7214V2')).toBe('1207.7214V2');
   });
 
+  it('classifies an upper-case old-style arXiv ID as arxiv once normalized', () => {
+    expect(classifyPaperId(normalizePaperId('HEP-TH/9711200'))).toBe('arxiv');
+    expect(classifyPaperId(normalizePaperId('MATH.AG/0601001'))).toBe('arxiv');
+  });
+
+  it('leaves DOIs and other identifiers in their own case', () => {
+    expect(normalizePaperId('10.1016/S0370-2693(98)00377-3')).toBe('10.1016/S0370-2693(98)00377-3');
+    expect(normalizePaperId('HEP-TH/97112')).toBe('HEP-TH/97112');
+  });
+
   it('is idempotent on every normalized form', () => {
     for (const input of [
+      'HEP-TH/9711200v2',
       '1207.7214v2',
       'https://arxiv.org/pdf/hep-th/9711200v2.pdf',
       `doi:https://doi.org/${DOI}`,

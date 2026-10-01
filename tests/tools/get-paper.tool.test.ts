@@ -152,7 +152,10 @@ describe('the paper input', () => {
     ['arXiv:hep-th/9711200v1', 'hep-th/9711200'],
     ['https://arxiv.org/abs/hep-th/9711200v2', 'hep-th/9711200'],
     ['https://arxiv.org/pdf/hep-th/9711200.pdf', 'hep-th/9711200'],
+    ['HEP-TH/9711200', 'hep-th/9711200'],
+    ['arXiv:HEP-TH/9711200v2', 'hep-th/9711200'],
     ['math.GT/0309136', 'math.GT/0309136'],
+    ['MATH.GT/0309136', 'math.GT/0309136'],
   ];
 
   it.each(ARXIV_FORMS)('resolves %j with q=arxiv:%s', async (paper, bare) => {
@@ -284,7 +287,7 @@ describe('max_authors and the author cap', () => {
   it.each([
     [0, 0],
     [1, 1],
-    [500, 500],
+    [499, 499],
   ])('honors max_authors %i against a 600-author record', async (maxAuthors, listed) => {
     routeRecord(dossierMetadata(600));
     routeData();
@@ -301,6 +304,22 @@ describe('max_authors and the author cap', () => {
     expect(out.notice).toBe(
       `Showing ${listed} of 600 authors; raise max_authors (up to 500) to list more.`,
     );
+  });
+
+  it('at the 500 maximum, routes a membership check to literature search instead of raising the cap', async () => {
+    routeRecord(dossierMetadata(2_932));
+    routeData();
+
+    const result = await run({ paper: HIGGS.recid, max_authors: 500 });
+
+    const out = structured<Dossier>(result);
+    expect(out.authors).toHaveLength(500);
+    expect(out).toMatchObject({ authorCount: 2_932, shown: 500, cap: 500, truncated: true });
+    expect(out.notice).toBe(
+      `Showing 500 of 2932 authors, the max_authors maximum; the other 2432 are not listed. To check whether someone is on this paper, call cern_inspire_search_literature with query "recid:${HIGGS.recid} and a <BAI or name>", which returns the paper when they are a listed author.`,
+    );
+    expect(out.notice).not.toContain('raise max_authors');
+    expect(fullText(result)).toContain('the max_authors maximum; the other 2432 are not listed.');
   });
 
   it('reads a blank max_authors as the default 25', async () => {
@@ -842,6 +861,36 @@ describe('the dossier and format() parity', () => {
     );
   });
 
+  it('names the material each licence covers, so one URL listed for two materials reads as two entries', async () => {
+    const CC_BY = 'http://creativecommons.org/licenses/by/4.0/';
+    routeRecord(
+      dossierMetadata(1, {
+        license: [
+          { license: 'CC-BY-4.0', imposing: 'Springer', url: CC_BY },
+          { license: 'CC BY 4.0', material: 'preprint', url: CC_BY },
+          { material: 'publication', imposing: 'SCOAP3', url: CC_BY },
+        ],
+      }),
+    );
+    routeData();
+
+    const result = await run({ paper: HIGGS.recid });
+
+    expect(structured<Dossier>(result).licenses).toEqual([
+      { url: CC_BY, imposing: 'Springer' },
+      { url: CC_BY, material: 'preprint' },
+      { url: CC_BY, material: 'publication', imposing: 'SCOAP3' },
+    ]);
+    expect(bodyText(result)).toContain(
+      [
+        '### Licenses',
+        `- ${CC_BY} (imposed by Springer)`,
+        `- ${CC_BY} (for the preprint)`,
+        `- ${CC_BY} (for the publication · imposed by SCOAP3)`,
+      ].join('\n'),
+    );
+  });
+
   it('renders refereed, citeable, and core false as no', async () => {
     routeRecord(dossierMetadata(1, { refereed: false, citeable: false, core: false }));
     routeData();
@@ -957,7 +1006,13 @@ describe('upstream text stays out of inline markdown slots', () => {
         document_type: [inj('article')],
         texkeys: [inj('ATLAS:2012yve')],
         urls: [{ value: inj('https://example.org/a'), description: inj('Project page') }],
-        license: [{ url: inj('https://example.org/license'), imposing: inj('Publisher') }],
+        license: [
+          {
+            url: inj('https://example.org/license'),
+            imposing: inj('Publisher'),
+            material: inj('preprint'),
+          },
+        ],
       }),
     );
     routeData(

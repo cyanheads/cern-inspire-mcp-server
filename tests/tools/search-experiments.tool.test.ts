@@ -359,12 +359,39 @@ describe('lifecycle fields', () => {
     );
   });
 
-  it('says Not available for a record with no dates and does not call it ongoing', async () => {
+  it('says Not available for a record with no dates and leaves ongoing unknown', async () => {
     const { result, record } = await only({}, ['date_started', 'date_completed']);
 
-    expect(record?.ongoing).toBe(false);
-    expect(bodyText(result)).toContain('**Dates:** Not available · **Ongoing:** no');
+    expect(record).not.toHaveProperty('ongoing');
+    expect(bodyText(result)).toContain('**Dates:** Not available · **Ongoing:** not recorded');
   });
+
+  it.each<
+    [
+      string,
+      Parameters<typeof experimentMetadata>[0],
+      ('date_started' | 'date_completed')[],
+      string,
+    ]
+  >([
+    [
+      'only a proposal date',
+      { date_proposed: '2015' },
+      ['date_started', 'date_completed'],
+      'proposed 2015',
+    ],
+    ['only a start date', { date_started: '2020-01-01' }, ['date_completed'], 'started 2020-01-01'],
+  ])(
+    'leaves ongoing unknown for a record with %s and no completion date, never inferring it',
+    async (_label, dates, drop, rendered) => {
+      const { result, record } = await only(dates, drop);
+
+      expect(record).not.toHaveProperty('ongoing');
+      expect(record).not.toHaveProperty('dateCompleted');
+      expect(result.structuredContent).toEqual(expect.schemaMatching(searchExperimentsTool.output));
+      expect(bodyText(result)).toContain(`**Dates:** ${rendered} · **Ongoing:** not recorded`);
+    },
+  );
 
   it("echoes INSPIRE's stored paper count with the label that says it is INSPIRE's", async () => {
     const { result, record } = await only({ number_of_papers: 18497 });

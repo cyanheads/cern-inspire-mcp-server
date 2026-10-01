@@ -139,6 +139,12 @@ export const paperDossierSchema = z.object({
       z
         .object({
           url: z.string().describe('Licence URL.'),
+          material: z
+            .string()
+            .optional()
+            .describe(
+              'Which version of the paper the licence covers (e.g. preprint, publication), when recorded.',
+            ),
           imposing: z.string().optional().describe('Who imposes the licence, when recorded.'),
         })
         .describe('One licence.'),
@@ -316,9 +322,13 @@ function renderPaperDossier(paper: PaperDossierOutput): string {
     lines.push(
       '',
       '### Licenses',
-      ...paper.licenses.map(
-        (l) => `- ${printUrl(l.url)}${l.imposing ? ` (imposed by ${inline(l.imposing)})` : ''}`,
-      ),
+      ...paper.licenses.map((l) => {
+        const details = [
+          l.material && `for the ${inline(l.material)}`,
+          l.imposing && `imposed by ${inline(l.imposing)}`,
+        ].filter(Boolean);
+        return `- ${printUrl(l.url)}${details.length > 0 ? ` (${details.join(' · ')})` : ''}`;
+      }),
     );
   }
 
@@ -415,7 +425,9 @@ export const getPaperTool = tool('cern_inspire_get_paper', {
     }
     if (authorsInRecord > input.max_authors) {
       notices.unshift(
-        `Showing ${shown} of ${authorsInRecord} authors; raise max_authors (up to ${MAX_AUTHORS_LIMIT}) to list more.`,
+        input.max_authors < MAX_AUTHORS_LIMIT
+          ? `Showing ${shown} of ${authorsInRecord} authors; raise max_authors (up to ${MAX_AUTHORS_LIMIT}) to list more.`
+          : `Showing ${shown} of ${authorsInRecord} authors, the max_authors maximum; the other ${authorsInRecord - shown} are not listed. To check whether someone is on this paper, call cern_inspire_search_literature with query "recid:${paper.recid} and a <BAI or name>", which returns the paper when they are a listed author.`,
       );
       ctx.enrich.truncated({ shown, cap: input.max_authors, guidance: notices.join(' ') });
     } else if (notices.length > 0) {

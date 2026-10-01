@@ -285,7 +285,9 @@ export function toPaperLookup(
       urls: urls(m.urls),
       licenses: (m.license ?? []).flatMap((l) => {
         const url = str(l.url);
-        return url === undefined ? [] : [{ url, ...opt('imposing', str(l.imposing)) }];
+        return url === undefined
+          ? []
+          : [{ url, ...opt('material', str(l.material)), ...opt('imposing', str(l.imposing)) }];
       }),
       inspireUrl: `${INSPIRE_WEB}/literature/${recid}`,
       citingQuery: `refersto:recid:${recid}`,
@@ -429,6 +431,14 @@ export function toCitationSummary(body: RawCitationSummaryResponse): CitationSum
 /** INSPIRE's `date_completed` sentinel for an experiment still running. */
 const ONGOING_SENTINEL = '9999';
 
+/**
+ * True for the running sentinel, false for a real completion date, and
+ * `undefined` when INSPIRE records no completion date: many active experiments
+ * carry none, so the status is unknown and is never inferred from other dates.
+ */
+const ongoingFrom = (completed: string | undefined): boolean | undefined =>
+  completed === undefined ? undefined : completed === ONGOING_SENTINEL;
+
 export function toExperimentRecord(hit: RawHit<RawExperimentMetadata>): ExperimentRecord {
   const m = hit.metadata ?? {};
   const legacyName = str(m.legacy_name) ?? '';
@@ -459,7 +469,7 @@ export function toExperimentRecord(hit: RawHit<RawExperimentMetadata>): Experime
     ...opt('dateApproved', str(m.date_approved)),
     ...opt('dateStarted', str(m.date_started)),
     ...opt('dateCompleted', completed === ONGOING_SENTINEL ? undefined : completed),
-    ongoing: completed === ONGOING_SENTINEL,
+    ...opt('ongoing', ongoingFrom(completed)),
     ...opt('numberOfPapers', num(m.number_of_papers)),
     ...opt('description', str(m.description)),
     urls: urls(m.urls),

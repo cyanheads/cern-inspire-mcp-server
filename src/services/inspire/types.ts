@@ -76,7 +76,7 @@ export interface RawLiteratureMetadata {
   imprints?: { date?: string }[];
   inspire_categories?: { term?: string }[];
   keywords?: RawValue[];
-  license?: { imposing?: string; url?: string }[];
+  license?: { imposing?: string; license?: string; material?: string; url?: string }[];
   number_of_pages?: number;
   preprint_date?: string;
   publication_info?: RawPublicationInfo[];
@@ -287,7 +287,7 @@ export interface PaperDossier {
   hepdata: HepdataAvailability;
   inspireUrl: string;
   keywords: string[];
-  licenses: { imposing?: string; url: string }[];
+  licenses: { imposing?: string; material?: string; url: string }[];
   numberOfPages?: number;
   preprintDate?: string;
   publicationDate?: string;
@@ -397,7 +397,8 @@ export interface ExperimentRecord {
   name?: string;
   nameVariants: string[];
   numberOfPapers?: number;
-  ongoing: boolean;
+  /** Absent when INSPIRE records no completion date: the status is unknown. */
+  ongoing?: boolean;
   projectTypes: string[];
   recid: string;
   shortName?: string;

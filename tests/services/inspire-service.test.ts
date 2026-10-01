@@ -1147,6 +1147,26 @@ describe('searchExperiments', () => {
     expect(experiment).toMatchObject({ ongoing: false, dateCompleted: '2013' });
   });
 
+  it('leaves ongoing unset when INSPIRE records no completion date, whatever else it records', async () => {
+    h.route(
+      '/experiments',
+      jsonResponse(
+        experimentPage([
+          omit(experimentMetadata({ date_proposed: '2015' }), 'date_started', 'date_completed'),
+          omit(experimentMetadata({ date_started: '2020-01-01' }), 'date_completed'),
+        ]),
+      ),
+    );
+
+    const { experiments } = await h.service.searchExperiments('DUNE', 5, h.call());
+
+    expect(experiments).toHaveLength(2);
+    for (const experiment of experiments) {
+      expect(experiment).not.toHaveProperty('ongoing');
+      expect(experiment).not.toHaveProperty('dateCompleted');
+    }
+  });
+
   it('reads a sparse record with only a legacy name', async () => {
     h.route(
       '/experiments',
@@ -1161,7 +1181,6 @@ describe('searchExperiments', () => {
       institutions: [],
       classification: [],
       projectTypes: [],
-      ongoing: false,
       urls: [],
       nameVariants: [],
       literatureQuery: 'accelerator_experiments.legacy_name:"FNAL-E-0001"',

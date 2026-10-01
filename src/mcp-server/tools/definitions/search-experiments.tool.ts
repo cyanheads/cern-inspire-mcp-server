@@ -56,7 +56,12 @@ const experimentSchema = z
       .string()
       .optional()
       .describe('Date completed; omitted while ongoing or when unrecorded.'),
-    ongoing: z.boolean().describe('True when INSPIRE marks the experiment as still running.'),
+    ongoing: z
+      .boolean()
+      .optional()
+      .describe(
+        'True when INSPIRE marks the experiment as still running, false when it records a completion date; omitted when INSPIRE records neither, so the status is unknown.',
+      ),
     numberOfPapers: z
       .number()
       .optional()
@@ -120,8 +125,9 @@ function renderExperiment(e: ExperimentOutput, position: number): string[] {
     e.dateStarted && `started ${inline(e.dateStarted)}`,
     e.dateCompleted && `completed ${inline(e.dateCompleted)}`,
   ].filter(Boolean);
+  const ongoing = e.ongoing === undefined ? 'not recorded' : e.ongoing ? 'yes' : 'no';
   lines.push(
-    `**Dates:** ${dates.length > 0 ? dates.join(' · ') : 'Not available'} · **Ongoing:** ${e.ongoing ? 'yes' : 'no'}`,
+    `**Dates:** ${dates.length > 0 ? dates.join(' · ') : 'Not available'} · **Ongoing:** ${ongoing}`,
   );
 
   if (e.institutions.length > 0) {
