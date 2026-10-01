@@ -9,18 +9,37 @@
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
 
+> **Read the design next:** `docs/design.md` records the tool surface, the input and output shapes, the INSPIRE API behavior verified live, the service's pacing and retry table, the design decisions, and the deferred HEPData-direct tools. Update it when the surface or a decision changes.
+
 ---
 
-## First Session
+## Domain
 
-This project was just scaffolded with `bunx @cyanheads/mcp-ts-core init`. You're holding a production-grade MCP framework with the hard parts already solved — error handling, telemetry, auth, transport, validation, lifecycle. What's missing is the **domain**. Your job: design the tool, resource, and service surface with the user, then implement it as small pure handlers that throw — the framework catches, classifies, and instruments the rest. Design before code; the user's first messages set direction, so wait for them before scaffolding definitions.
+Eight read-only tools and one resource over INSPIRE-HEP's keyless REST API (`https://inspirehep.net/api`). HEPData is reached only through INSPIRE's `data` collection; no request goes to hepdata.net, whose bot challenge refuses the server's User-Agent (design § Design Decisions #1). So the server reads no table values: `cern_inspire_get_paper` and `cern_inspire_search_hepdata` report each HEPData record's DOI, latest version, table count, and hepdata.net link.
 
-> **Remove this section** from CLAUDE.md / AGENTS.md after completing these steps. The skills and conventions below remain — this block is one-time onboarding only.
+| Upstream path | Used by |
+|:--------------|:--------|
+| `/literature` (search, `fields`-selected) | `cern_inspire_search_literature`, `cern_inspire_get_paper` (arXiv and DOI resolution included), `inspire://literature/{recid}` |
+| `/literature` with `format=` (`bibtex`, `latex-eu`, `latex-us`) | `cern_inspire_export_citations` |
+| `/literature/facets` (`facet_name=citation-summary`) | `cern_inspire_get_citation_summary` |
+| `/authors` | `cern_inspire_search_authors`, author resolution in `cern_inspire_get_citation_summary` |
+| `/experiments` | `cern_inspire_search_experiments` |
+| `/data` | `cern_inspire_search_hepdata`, the `hepdata` block of `cern_inspire_get_paper` |
 
-1. **Get your bearings.** Take stock of the project tree, the skills in `framework-skills/`, and the tools/MCP servers available. Light tool use is fine for context-building — you're mapping the territory, not committing yet.
-2. **Read the framework docs** — `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` (builders, Context, errors, exports, conventions)
-3. **Run the `setup` skill** — read `framework-skills/setup/SKILL.md` and follow its checklist (project orientation, agent protocol file selection, echo definition cleanup, skill sync)
-4. **Design the server** — read `framework-skills/design-mcp-server/SKILL.md` and work through it with the user to map the domain into tools, resources, and services before scaffolding
+`cern_inspire_list_reference` serves static tables and makes no upstream call. There are no prompts.
+
+`InspireService` (`src/services/inspire/inspire-service.ts`) owns every request: one process-wide pacer under INSPIRE's published 15 requests per 5 s per address (`limits: [{ requests: 12, perMs: 5_000 }]`, `maxConcurrent: 4`, a cooldown after a `429`), `withRetry` outside the pacer (2 retries), one 55 s budget per tool call opened by `beginCall(ctx)` and threaded through every request in the call, an 8 MiB byte ceiling through `fetchBounded` (`src/services/http/fetch-bounded.ts`), and a strict query-parameter allowlist, since INSPIRE silently ignores unknown parameters. There is no cache and no server-specific env var.
+
+Conventions every definition follows:
+
+- **Every INSPIRE request goes through `InspireService`**, with the call opened by `inspire.beginCall(ctx)`. Never `fetch` from a handler: pacing, the budget, retries, and error classification live in the service.
+- **Honest User-Agent only.** `cern-inspire-mcp-server/<version> (+https://github.com/cyanheads/cern-inspire-mcp-server)`. Never add a `curl`, `Wget`, or `python-requests` token, and send nothing to hepdata.net.
+- **Never request `email_addresses`.** INSPIRE's terms bar collecting them in bulk; the author `fields` list leaves them out.
+- **Shared inputs** live in `src/mcp-server/tools/inputs.ts`: `blankAsUnset` wraps every optional or defaulted input; `paperInput`, `documentTypesInput` / `subjectsInput` (array or comma-joined string, case-folded, up to 4, values AND together), `yearFromInput` / `yearToInput`, `authorQueryInput` / `authorIdInput`, and the `formatAppliedFilters` echo.
+- **Upstream text is data.** Every upstream or caller string in `format()` goes through `inline()`, `cell()`, `quote()`, `fenced()`, or `printUrl()` from `src/utils/render.ts`, and a list item that opens with one wraps it in `atLineStart()`; outside a `quote()` or `fenced()` block, no other line opens with upstream text. `structuredContent` keeps each string as received, apart from Unicode tag characters, which the service drops at decode.
+- **Required enrichment first.** A handler writes its required enrichment fields (`truncated` / `shown` / `cap`, `totalCount`, the echo strings) with neutral values before its first upstream call or branch, then overwrites them where the real value is known.
+- **Errors.** Every tool that reaches INSPIRE declares `inspire_rate_limited`, `pacer_shed`, and `upstream_unreadable` inline (`thrownBy: 'service'`), plus `invalid_query` when it sends a caller query; the resource declares the first three. Handler-side reasons (`paper_not_found`, `beyond_result_window`, `invalid_year_range`, `missing_target`, `author_not_identifier`, `author_not_found`) are thrown through `ctx.fail`, and tools mark caller-input reasons `severity: 'notice'`.
+- **No fabrication.** A field INSPIRE leaves out stays absent (`firstAuthor`, `ongoing`, `averageCitations`), and `format()` prints "Not available" or "not recorded" rather than a guess.
 
 ---
 
@@ -59,155 +78,169 @@ Tailor suggestions to what's actually missing or stale — don't recite the full
 
 ### Tool
 
+`cern_inspire_get_paper`, condensed (`src/mcp-server/tools/definitions/get-paper.tool.ts`):
+
 ```ts
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { blankAsUnset, paperInput } from '@/mcp-server/tools/inputs.js';
+import { inline } from '@/utils/render.js';
+import { getInspireService } from '@/services/inspire/inspire-service.js';
 
-export const searchItems = tool('search_items', {
-  description: 'Search inventory items by query.',
-  annotations: { readOnlyHint: true },
+export const getPaperTool = tool('cern_inspire_get_paper', {
+  title: 'Get INSPIRE paper',
+  description: "Fetch one paper's full INSPIRE-HEP record by recid, arXiv ID, or DOI: …", // abridged
+  annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
-    query: z.string().describe('Search terms'),
-    limit: z.number().int().min(1).max(100).default(10).describe('Max results (1–100)'),
+    paper: paperInput, // shared input: recid, arXiv ID, DOI, or URL forms, normalized in preprocess
+    max_authors: blankAsUnset(z.number().int().min(0).max(500).default(25)).describe(
+      'Most authors to list (0–500, default 25). The full count is always in authorCount.',
+    ),
   }),
-  output: z.object({
-    items: z.array(z.object({
-      id: z.string().describe('Item ID'),
-      name: z.string().describe('Item name'),
-    })).describe('Matching items'),
-  }),
-  auth: ['inventory:read'],
+  output: paperDossierSchema, // also the inspire://literature/{recid} resource's output
+  enrichment: {
+    truncated: z.boolean().describe('True when the author list was capped at max_authors.'),
+    shown: z.number().describe('Number of authors listed.'),
+    cap: z.number().describe('The max_authors cap applied.'),
+    notice: z.string().optional().describe('Guidance when the author list was capped or HEPData availability could not be checked.'),
+  },
+  errors: [
+    {
+      reason: 'paper_not_found',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'The recid, arXiv ID, or DOI matches no INSPIRE literature record.',
+      recovery: 'Find the record with cern_inspire_search_literature using title words, an author, or the arXiv number, then call cern_inspire_get_paper with its recid.',
+      severity: 'notice',
+    },
+    // inspire_rate_limited, pacer_shed, upstream_unreadable: declared inline, thrownBy: 'service'
+  ],
 
   async handler(input, ctx) {
-    const items = await findItems(input.query, input.limit);
-    ctx.log.info('Search completed', { query: input.query, count: items.length });
-    return { items };
+    ctx.enrich({ truncated: false, shown: 0, cap: input.max_authors }); // required enrichment first
+
+    const inspire = getInspireService();
+    const lookup = await inspire.getPaper(input.paper, input.max_authors, inspire.beginCall(ctx));
+    if (!lookup) {
+      throw ctx.fail('paper_not_found', `No INSPIRE literature record matches "${inline(input.paper)}".`, {
+        paper: input.paper,
+      });
+    }
+    const { paper, authorsInRecord } = lookup;
+    ctx.enrich({ shown: paper.authors.length });
+    if (authorsInRecord > input.max_authors) {
+      ctx.enrich.truncated({
+        shown: paper.authors.length,
+        cap: input.max_authors,
+        guidance: `Showing ${paper.authors.length} of ${authorsInRecord} authors; raise max_authors (up to 500) to list more.`,
+      });
+    }
+    return paper;
   },
 
-  // format() populates content[] — the markdown twin of structuredContent.
-  // Different clients read different surfaces (Claude Code → structuredContent,
-  // Claude Desktop → content[]); both must carry the same data.
-  // Enforced at lint time: every field in `output` must appear in the rendered text.
-  format: (result) => [{
-    type: 'text',
-    text: result.items.map(i => `**${i.id}**: ${i.name}`).join('\n'),
-  }],
+  // format() is the content[] twin of structuredContent: every output field renders,
+  // and every upstream string passes through inline() / quote() / printUrl().
+  format: (paper) => [{ type: 'text', text: renderPaperDossier(paper) }],
 });
 ```
 
 ### Resource
 
+`inspire://literature/{recid}` (`src/mcp-server/resources/definitions/inspire-literature.resource.ts`) serves the same dossier through the same service call:
+
 ```ts
 import { resource, z } from '@cyanheads/mcp-ts-core';
-import { notFound } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { paperDossierSchema } from '@/mcp-server/tools/definitions/get-paper.tool.js';
+import { getInspireService } from '@/services/inspire/inspire-service.js';
 
-export const itemData = resource('inventory://{itemId}', {
-  description: 'Fetch an inventory item by ID.',
-  params: z.object({ itemId: z.string().describe('Item identifier') }),
-  auth: ['inventory:read'],
-  async handler(params, ctx) {
-    const item = await ctx.state.get(`item/${params.itemId}`);
-    if (!item) throw notFound(`Item ${params.itemId} not found`, { itemId: params.itemId });
-    return item;
-  },
-});
-```
+const RESOURCE_MAX_AUTHORS = 25; // cern_inspire_get_paper's default
 
-### Prompt
-
-```ts
-import { prompt, z } from '@cyanheads/mcp-ts-core';
-
-export const reviewCode = prompt('review_code', {
-  description: 'Review code for issues and best practices.',
-  args: z.object({
-    code: z.string().describe('Code to review'),
-    language: z.string().optional().describe('Programming language'),
+export const inspireLiteratureResource = resource('inspire://literature/{recid}', {
+  name: 'inspire_literature',
+  title: 'INSPIRE literature record',
+  description: 'One INSPIRE-HEP literature record by recid, as the cern_inspire_get_paper dossier in JSON: …', // abridged
+  mimeType: 'application/json',
+  params: z.object({
+    recid: z.string().regex(/^\d{1,9}$/).describe('INSPIRE literature record ID (recid), e.g. 451647.'),
   }),
-  generate: (args) => [
-    { role: 'user', content: { type: 'text', text: `Review this ${args.language ?? ''} code:\n${args.code}` } },
+  output: paperDossierSchema,
+  cacheHint: { ttlMs: 3_600_000, cacheScope: 'public' },
+  errors: [
+    {
+      reason: 'paper_not_found',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'The recid matches no INSPIRE literature record.',
+      recovery: 'Find the record with cern_inspire_search_literature using title words, an author, or the arXiv number, then call cern_inspire_get_paper with its recid.',
+    },
+    // inspire_rate_limited, pacer_shed, upstream_unreadable: declared inline, thrownBy: 'service'
   ],
+
+  async handler(params, ctx) {
+    const inspire = getInspireService();
+    const lookup = await inspire.getPaper(params.recid, RESOURCE_MAX_AUTHORS, inspire.beginCall(ctx));
+    if (!lookup) {
+      throw ctx.fail('paper_not_found', `No INSPIRE literature record has recid ${params.recid}.`, {
+        recid: params.recid,
+      });
+    }
+    return lookup.paper;
+  },
 });
 ```
 
 ### Server config
 
-```ts
-// src/config/server-config.ts — lazy-parsed, separate from framework config
-import { z } from '@cyanheads/mcp-ts-core';
-import { parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
+The server has no env vars of its own: INSPIRE is keyless, and the pacer limits, call budget, and byte ceiling are constants in `inspire-service.ts`. There is no `src/config/`. A new env var lands on every one of these surfaces in the same change:
 
-const ServerConfigSchema = z.object({
-  apiKey: z.string().describe('External API key'),
-  maxResults: z.coerce.number().default(100),
-  verboseLogging: z.stringbool().default(false).describe('Enable verbose logging'),
-});
+| Surface | What it needs |
+|:--------|:--------------|
+| `src/config/server-config.ts` (new) | A lazily parsed Zod schema read through `parseEnvConfig` from `@cyanheads/mcp-ts-core/config`, so errors name the variable; `z.stringbool()` for booleans, never `z.coerce.boolean()` |
+| `.env.example` | The variable under `# ── Server-specific`, with a comment and its default, replacing the "None." note |
+| `server.json` | `environmentVariables[]` in both package entries, `isRequired` matching what INSPIRE actually requires |
+| `manifest.json` | A `user_config` entry (`title`, `type`, `"default": ""` unless required) wired into `mcp_config.env` as `"X": "${user_config.X}"` |
+| `.claude-plugin/plugin.json` | A `userConfig` entry referenced from `env` as `"X": "${user_config.X}"` |
+| `.codex-plugin/mcp.json` | The name in `env_vars`; never `"X": ""` in `env` |
+| `README.md` | A Configuration table row, and the "no settings of its own" sentence above it |
+| `docs/design.md` and this file | § Config in the design, and the Domain section's "no server-specific env var" line |
 
-let _config: z.infer<typeof ServerConfigSchema> | undefined;
-export function getServerConfig() {
-  _config ??= parseEnvConfig(ServerConfigSchema, {
-    apiKey: 'MY_API_KEY',
-    maxResults: 'MY_MAX_RESULTS',
-    verboseLogging: 'MY_VERBOSE_LOGGING',
-  });
-  return _config;
-}
-```
+`lint:packaging` (run by `devcheck`) checks the name parity between `server.json` and `manifest.json` and the `${user_config.X}` wiring; the rest is by hand.
 
-`parseEnvConfig` maps Zod schema paths → env var names so errors name the variable (`MY_API_KEY`) not the path (`apiKey`). Throws `ConfigurationError`, which the framework prints as a clean startup banner.
+### Server entry point
 
-For env booleans use `z.stringbool()`, never `z.coerce.boolean()` — `Boolean("false")` is `true`, so a coerced flag can't be disabled through the environment. `z.stringbool()` parses `true/false/1/0/yes/no/on/off` and rejects anything else, so `=false` actually disables.
-
-### Server identity and instructions
-
-`createApp()` accepts optional identity fields forwarded to the SDK's `initialize` response and the server manifest (`/.well-known/mcp.json`):
+`src/index.ts`:
 
 ```ts
 await createApp({
-  name: 'my-mcp-server',
-  title: 'My Server',                         // human-readable display name
-  websiteUrl: 'https://github.com/owner/repo', // canonical homepage URL
-  description: 'One-line description.',        // wins over MCP_SERVER_DESCRIPTION
-  icons: [{ src: 'https://example.com/icon.png', sizes: ['48x48'], mimeType: 'image/png' }],
-  instructions: 'Use shortcut alpha for the most common case.', // session-level context
+  name: 'cern-inspire-mcp-server',
+  title: 'cern-inspire-mcp-server', // display identity is the machine name; lint:packaging checks the pair
+  tools: allToolDefinitions,
+  resources: allResourceDefinitions,
+  instructions: 'cern-inspire-mcp-server reads INSPIRE-HEP (inspirehep.net), …', // abridged
+  setup(core) {
+    initInspireService(core.config); // the User-Agent carries core.config.mcpServerVersion
+  },
+  teardown() {
+    disposeInspireService(); // releases the pacer's timer and rejects queued waiters
+  },
 });
 ```
 
-`instructions` is optional server-level orientation, sent on every `initialize` as session-level context. Use it for deployment guidance (connection aliases, regional notes, scope hints) instead of repeating the same context across tool descriptions. Client adoption is uneven, but there's no downside when set.
-
-### Session posture and shutdown
-
-Two more `createApp()` options shape how the server runs rather than how it presents itself:
-
-```ts
-await createApp({
-  sessionMode: 'stateless',          // or { default: 'stateful', require: 'stateful' }
-  setup(core) { startMyWatcher(core.config); },
-  async teardown() { await stopMyWatcher(); },
-});
-```
-
-`sessionMode` declares the HTTP session posture in `src/` instead of leaving it to a deployment's `MCP_SESSION_MODE`, which still wins whenever it carries a meaningful value (an empty string and an unsubstituted `${…}` placeholder read as unset and fall through to the option). Add `require: 'stateful'` when a tool asks the caller for input mid-handler via `ctx.requestInput`: startup then fails with a `ConfigurationError` rather than serving a mode in which a 2025-era client can never answer the prompt. Stdio is never refused.
-
-`teardown(core)` is the `setup()` counterpart — release a watcher, socket, or non-`unref()`'d timer there. It runs after the transport stops and before the logger closes, on every shutdown path, and a signal-triggered shutdown then exits the process explicitly (0, or 1 if a step never settles within the framework's 10 s ceiling).
+- No `description`: the framework serves `package.json`'s.
+- `instructions` is mirrored in `docs/design.md` § Server Instructions with its character count. Change both together.
+- No `sessionMode`: no handler calls `ctx.requestInput`, so the deployment picks the mode through `MCP_SESSION_MODE`, and `.env.example` and the Dockerfile set `stateless`.
 
 ---
 
 ## Context
 
-Handlers receive a unified `ctx` object. Key properties:
+Handlers receive a unified `ctx` object. The properties this server uses:
 
 | Property | Description |
 |:---------|:------------|
-| `ctx.log` | Request-scoped logger — `.debug()`, `.info()`, `.notice()`, `.warning()`, `.error()`. Auto-correlates requestId, traceId, tenantId. Dual-sink: Pino **and** `notifications/message` to the client, so treat it as client-visible. |
-| `ctx.state` | Tenant-scoped KV — `.get(key)`, `.set(key, value, { ttl? })`, `.delete(key)`, `.getMany(keys)`, `.list(prefix, { cursor, limit })`. Accepts any JSON-serializable value; reads return its JSON form (a `Date` comes back as an ISO string). |
-| `ctx.requestInput` | Suspend and ask the caller for more input — `return ctx.requestInput({ inputRequests: { key: inputRequired.elicit({ message, requestedSchema }) } })`. Never returns; the handler is re-entered with the answers. Always present. |
-| `ctx.inputs` | The request's responses — `.accepted(key, schema)`, `.view(key)`, `.state()`, `.dropped` — limited to what the client declared (`elicitation` and its form/url modes, `sampling`, `roots`). Client-supplied: a consent gate trusts only a `ctx.state` record it stored when it asked, bound to the operation, caller, and target (see the `api-context` skill). |
-| `ctx.clientCapabilities` | What the client declared for this request, `undefined` when no view exists. Decides whether to ask for optional context (e.g. roots); never a reason to skip a consent prompt. |
-| `ctx.enrich` | Success-path agent context (empty-result notices, query echo, pagination totals) — `ctx.enrich(...)` or `.notice()` / `.total()` / `.echo()` / `.truncated()`. Reaches `structuredContent` and `content[]`; lands only when the definition declares an `enrichment` block (no-op otherwise). |
-| `ctx.content` | Non-text content blocks — `.image(data, mimeType)`, `.audio(data, mimeType)`, or `ctx.content(block)` for a raw block. Prepended to `content[]` after `format()`; never enters `structuredContent`. |
-| `ctx.signal` | `AbortSignal` for cancellation. |
-| `ctx.requestId` | Request ID — the one every log record of the call carries and its error envelope returns as `data.requestId`. |
-| `ctx.tenantId` | Tenant ID from JWT; `'default'` for stdio or HTTP with auth off. |
+| `ctx.log` | Request-scoped logger — `.debug()`, `.info()`, `.notice()`, `.warning()`, `.error()`. Auto-correlates requestId, traceId, tenantId. Dual-sink: Pino **and** `notifications/message` to the client, so treat it as client-visible. The service logs through `call.ctx.log`. |
+| `ctx.enrich` | Success-path agent context — `ctx.enrich({ … })` for declared fields, `.total()` (`totalCount`), `.truncated({ shown, cap, guidance })`, `.notice()`, `.echo()` (`effectiveQuery`). Reaches `structuredContent` and `content[]`; lands only when the definition declares an `enrichment` block. Write the required fields with neutral values before the first upstream call. |
+| `ctx.fail` | `throw ctx.fail(reason, message, data?)` for a reason declared in the definition's `errors[]`; the framework attaches the contract's `recovery` hint. |
+| `ctx.signal` | `AbortSignal` for cancellation. `beginCall(ctx)` carries it into `withRetry` and the pacer, so a cancelled call stops queueing and retrying. |
 
 ---
 
@@ -259,20 +292,39 @@ See framework CLAUDE.md and the `api-errors` skill for the full auto-classificat
 
 ```text
 src/
-  index.ts                              # createApp() entry point
-  config/
-    server-config.ts                    # Server-specific env vars (Zod schema)
-  services/
-    [domain]/
-      [domain]-service.ts               # Domain service (init/accessor pattern)
-      types.ts                          # Domain types
+  index.ts                              # createApp(): tools, resource, instructions, service setup/teardown
   mcp-server/
-    tools/definitions/
-      [tool-name].tool.ts               # Tool definitions
+    tools/
+      inputs.ts                         # Shared inputs (paper, facets, years, author ids) + appliedFilters echo
+      definitions/
+        index.ts                        # allToolDefinitions barrel
+        search-literature.tool.ts
+        get-paper.tool.ts               # also exports paperDossierSchema, the resource's output
+        export-citations.tool.ts
+        search-authors.tool.ts
+        get-citation-summary.tool.ts
+        search-experiments.tool.ts
+        search-hepdata.tool.ts
+        list-reference.tool.ts          # static vocabulary tables, no upstream call
     resources/definitions/
-      [resource-name].resource.ts       # Resource definitions
-    prompts/definitions/
-      [prompt-name].prompt.ts           # Prompt definitions
+      index.ts                          # allResourceDefinitions barrel
+      inspire-literature.resource.ts    # inspire://literature/{recid}
+  services/
+    http/
+      fetch-bounded.ts                  # One request: per-attempt timeout, byte ceiling, status accept-list
+    inspire/
+      inspire-service.ts                # InspireService: pacer, per-call budget, retries, param allowlist, field lists
+      identifiers.ts                    # Paper and author identifier normalization and routing (matchedAs)
+      normalize.ts                      # Raw INSPIRE records → output shapes; absent fields stay absent
+      types.ts                          # Raw upstream and normalized domain types
+      vocabulary.ts                     # Document types, subjects, citation-bucket ranges
+  utils/
+    render.ts                           # inline / cell / quote / fenced / printUrl / atLineStart for upstream text in format() and error messages
+tests/
+  fixtures/                             # INSPIRE bodies, service harness, shared failure suite, result readers
+  tools/  resources/  services/  shared/  # Suites mirroring src/
+docs/
+  design.md                             # Surface, verified upstream behavior, decisions, deferred HEPData tools
 ```
 
 ---
@@ -357,11 +409,15 @@ When you complete a skill's checklist, check the boxes and add a completion time
 | `bun run format` | Auto-fix formatting (safe fixes only) |
 | `bun run format:unsafe` | Also apply Biome's unsafe autofixes — review the diff; they can change behavior |
 | `bun run test` | Run tests (Vitest — use `bun run test`, not `bun test`) |
+| `bun run test:coverage` | Run tests with Istanbul coverage |
+| `bun run start` | Run the built server (transport from `MCP_TRANSPORT_TYPE`, default stdio) |
 | `bun run start:stdio` | Production mode (stdio) |
 | `bun run start:http` | Production mode (HTTP) |
 | `bun run changelog:build` | Regenerate `CHANGELOG.md` from `changelog/*.md` |
 | `bun run changelog:check` | Verify `CHANGELOG.md` is in sync (used by devcheck) |
 | `bun run bundle` | Build, pack, and clean a `.mcpb` for one-click Claude Desktop install |
+| `bun run release:github` | Create (or repair) the GitHub Release on the current version's tag, attaching the `.mcpb` (release step) |
+| `bun run publish-mcp` | Log in with the keychain-stored GitHub token and publish `server.json` to the MCP Registry (release step) |
 
 **CI is one file.** `.github/workflows/codeql.yml` (scaffolded) is the only GitHub Actions workflow: CodeQL is GitHub-owned end to end, and the file runs only while the repo's CodeQL *default setup* is turned off. Verification — `devcheck`, tests, the release gates — runs locally; don't add a workflow that re-runs it.
 
@@ -418,7 +474,7 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { McpError, JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 
 // Server's own code — via path alias
-import { getMyService } from '@/services/my-domain/my-service.js';
+import { getInspireService } from '@/services/inspire/inspire-service.js';
 ```
 
 ---
@@ -439,4 +495,10 @@ import { getMyService } from '@/services/my-domain/my-service.js';
 - [ ] `.codex-plugin/plugin.json` populated — `name`, `version`, `description`, `repository`, `license` from `package.json`; `interface.displayName` = the unscoped repo name (never the npm scope — `lint:packaging` enforces this); `interface.shortDescription` from `package.json` description
 - [ ] `.codex-plugin/mcp.json` updated — server name key is the unscoped repo name; every user-supplied variable (API key, contact email, instance URL) is listed in `env_vars` so Codex forwards it from the user's environment. Never write `"KEY": ""` into `env` — an empty value replaces the user's exported key and is read as unset
 - [ ] `.claude-plugin/plugin.json` populated — `name`, `version`, `description`, `author`, `repository`, `license`, `keywords` from `package.json`; inline `mcpServers` entry keyed by the unscoped repo name. Every user-supplied variable is declared under `userConfig` (`type`, `title`, `description`; `sensitive: true` for keys and tokens; `required: true` or `default: ""`) and referenced from `env` as `"KEY": "${user_config.<option>}"` — mirror the `user_config` block in `manifest.json`. Never write `"KEY": ""` into `env`
+- [ ] Every INSPIRE request goes through `InspireService` with the call opened by `inspire.beginCall(ctx)`; a new upstream parameter is added to `InspireParams` / `PARAM_NAMES`, a new field to the matching `*_FIELDS` list (never `email_addresses`), and nothing is sent to hepdata.net
+- [ ] Optional and defaulted inputs wrapped in `blankAsUnset`; paper, facet, year, and author inputs reused from `src/mcp-server/tools/inputs.ts`
+- [ ] Required enrichment written with neutral values before the first upstream call or branch
+- [ ] Error contract declared inline: `inspire_rate_limited`, `pacer_shed`, `upstream_unreadable` (`thrownBy: 'service'`), plus `invalid_query` when the tool sends a caller query; caller-input reasons carry `severity: 'notice'`
+- [ ] Every upstream or caller string in `format()` passes through a `render.ts` helper
+- [ ] Surface change mirrored in `docs/design.md`, the server instructions (`src/index.ts` and design § Server Instructions with its character count), `cern_inspire_list_reference` when vocabulary changes, and the README Overview and Capability reference
 - [ ] `npm run devcheck` passes

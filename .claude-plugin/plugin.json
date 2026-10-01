@@ -2,7 +2,7 @@
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "cern-inspire-mcp-server",
   "version": "0.1.0",
-  "description": "CERN and high-energy physics literature, experiments, HEPData measurement tables, and author citation metrics from INSPIRE.",
+  "description": "Search INSPIRE-HEP papers, authors, experiments, HEPData records; get citation metrics and BibTeX.",
   "author": {
     "name": "cyanheads",
     "email": "casey@caseyjhand.com",

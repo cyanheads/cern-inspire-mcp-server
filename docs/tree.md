@@ -1,6 +1,6 @@
 # cern-inspire-mcp-server - Directory Structure
 
-Generated on: 2026-10-01 09:10:58
+Generated on: 2026-10-01 11:02:12
 
 ```text
 cern-inspire-mcp-server/
@@ -24,6 +24,7 @@ cern-inspire-mcp-server/
 │   ├── extensions.json
 │   └── settings.json
 ├── changelog/
+│   ├── 0.1.x/
 │   └── template.md
 ├── docs/
 │   └── design.md
@@ -148,8 +149,7 @@ cern-inspire-mcp-server/
 │   │       │   ├── search-experiments.tool.ts
 │   │       │   ├── search-hepdata.tool.ts
 │   │       │   └── search-literature.tool.ts
-│   │       ├── inputs.ts
-│   │       └── render.ts
+│   │       └── inputs.ts
 │   ├── services/
 │   │   ├── http/
 │   │   │   └── fetch-bounded.ts
@@ -159,6 +159,8 @@ cern-inspire-mcp-server/
 │   │       ├── normalize.ts
 │   │       ├── types.ts
 │   │       └── vocabulary.ts
+│   ├── utils/
+│   │   └── render.ts
 │   └── index.ts
 ├── tests/
 │   ├── fixtures/
@@ -167,9 +169,6 @@ cern-inspire-mcp-server/
 │   │   ├── inspire-upstream.ts
 │   │   ├── service-harness.ts
 │   │   └── tool-result.ts
-│   ├── fuzz/
-│   ├── integration/
-│   ├── prompts/
 │   ├── resources/
 │   │   └── inspire-literature.resource.test.ts
 │   ├── services/
@@ -181,7 +180,6 @@ cern-inspire-mcp-server/
 │   │   ├── identifiers.test.ts
 │   │   ├── inputs.test.ts
 │   │   └── render.test.ts
-│   ├── smoke/
 │   └── tools/
 │       ├── export-citations.tool.test.ts
 │       ├── get-citation-summary.tool.test.ts
@@ -200,12 +198,14 @@ cern-inspire-mcp-server/
 ├── biome.json
 ├── bun.lock
 ├── bunfig.toml
+├── CHANGELOG.md
 ├── CLAUDE.md
 ├── devcheck.config.json
 ├── Dockerfile
 ├── LICENSE
 ├── manifest.json
 ├── package.json
+├── README.md
 ├── server.json
 ├── tsconfig.build.json
 ├── tsconfig.json

@@ -1,7 +1,7 @@
 {
   "name": "cern-inspire-mcp-server",
   "version": "0.1.0",
-  "description": "CERN and high-energy physics literature, experiments, HEPData measurement tables, and author citation metrics from INSPIRE.",
+  "description": "Search INSPIRE-HEP papers, authors, experiments, HEPData records; get citation metrics and BibTeX.",
   "author": {
     "name": "cyanheads",
     "email": "casey@caseyjhand.com",
@@ -14,10 +14,10 @@
   "mcpServers": "./.codex-plugin/mcp.json",
   "interface": {
     "displayName": "cern-inspire-mcp-server",
-    "shortDescription": "High-energy physics literature, experiments, and HEPData tables from INSPIRE.",
-    "longDescription": "Search particle physics papers on INSPIRE by keyword, SPIRES query, arXiv ID, or DOI, and read full records with authors, affiliations, and collaborations. Look up author profiles and HEP citation metrics, inspect collider and detector experiments, and pull the numerical measurement tables published with a paper from HEPData. Both upstream APIs are keyless.",
+    "shortDescription": "Search INSPIRE-HEP papers, authors, experiments, HEPData records; get citation metrics and BibTeX.",
+    "longDescription": "High-energy physics literature from INSPIRE-HEP. Search papers with INSPIRE query syntax or free text, filtered by document type, subject, and year; read a paper's full record by recid, arXiv ID, or DOI, with authors and affiliations, abstract, identifiers, citation counts, and linked experiments; and export INSPIRE's BibTeX or LaTeX entries for any set of papers. Find physicist profiles by name, BAI, ORCID, or INSPIRE ID, and compute citation summaries (h-index, citation totals, papers per citation bucket) for an author, a collaboration, or a topic. Look up experiments and collaborations such as ATLAS or DUNE, with their accelerators, institutions, and lifecycle dates. Find HEPData measurement records by process, observable, or energy through INSPIRE's index: each reports the record DOI, latest version, table count, and the hepdata.net page where the table values are read. A reference tool decodes the query syntax and filter vocabularies. No API key required; requests are paced under INSPIRE's limit of 15 per 5 seconds. INSPIRE metadata is mostly CC0 and HEPData tables are CC0; cite the HEPData record DOI when reusing its data.",
     "developerName": "cyanheads",
-    "category": "Research",
+    "category": "research",
     "capabilities": ["Read"],
     "websiteURL": "https://github.com/cyanheads/cern-inspire-mcp-server",
     "defaultPrompt": []

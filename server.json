@@ -1,7 +1,8 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.cyanheads/cern-inspire-mcp-server",
-  "description": "CERN and HEP literature, experiments, HEPData measurement tables, and citation metrics from INSPIRE.",
+  "title": "cern-inspire-mcp-server",
+  "description": "Search INSPIRE-HEP papers, authors, experiments, HEPData records; get citation metrics and BibTeX.",
   "repository": {
     "url": "https://github.com/cyanheads/cern-inspire-mcp-server",
     "source": "github"

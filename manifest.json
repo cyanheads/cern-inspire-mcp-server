@@ -1,11 +1,27 @@
 {
   "manifest_version": "0.3",
   "name": "cern-inspire-mcp-server",
+  "display_name": "cern-inspire-mcp-server",
   "version": "0.1.0",
-  "description": "CERN and high-energy physics literature, experiments, HEPData measurement tables, and author citation metrics from INSPIRE.",
+  "description": "Search INSPIRE-HEP papers, authors, experiments, HEPData records; get citation metrics and BibTeX.",
   "author": { "name": "cyanheads" },
   "license": "Apache-2.0",
   "repository": { "type": "git", "url": "https://github.com/cyanheads/cern-inspire-mcp-server" },
+  "homepage": "https://github.com/cyanheads/cern-inspire-mcp-server#readme",
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "typescript",
+    "cern",
+    "inspire",
+    "inspirehep",
+    "hepdata",
+    "high-energy-physics",
+    "particle-physics",
+    "citations",
+    "bibtex"
+  ],
   "server": {
     "type": "node",
     "entry_point": "dist/index.js",
