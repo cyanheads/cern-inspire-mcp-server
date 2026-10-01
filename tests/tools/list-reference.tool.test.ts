@@ -29,6 +29,9 @@ const TOPICS = [
   'hepdata',
 ] as const;
 
+/** The tool's table-cell escaping: backslashes, then pipes. */
+const cellText = (text: string) => text.replace(/\\/g, '\\\\').replace(/\|/g, '\\|');
+
 interface Entry {
   example?: string;
   meaning: string;
@@ -133,9 +136,9 @@ describe.each(TOPICS)('topic %s', (topic) => {
     rows.forEach((row, i) => {
       const entry = output.entries[i];
       expect(cells(row)).toHaveLength(3);
-      expect(row).toContain(entry?.term.replace(/\|/g, '\\|'));
-      expect(row).toContain(entry?.meaning.replace(/\|/g, '\\|'));
-      expect(row).toContain(entry?.example ? entry.example.replace(/\|/g, '\\|') : '—');
+      expect(row).toContain(cellText(entry?.term ?? ''));
+      expect(row).toContain(cellText(entry?.meaning ?? ''));
+      expect(row).toContain(entry?.example ? cellText(entry.example) : '—');
     });
   });
 

@@ -319,8 +319,8 @@ const REFERENCE: Record<Topic, Entry[]> = {
   ],
 };
 
-/** A static string in a table cell: pipes escaped so the row keeps its columns. */
-const cellText = (text: string) => text.replace(/\|/g, '\\|');
+/** A static string in a table cell: backslashes, then pipes, escaped so the row keeps its columns. */
+const cellText = (text: string) => text.replace(/\\/g, '\\\\').replace(/\|/g, '\\|');
 
 export const listReferenceTool = tool('cern_inspire_list_reference', {
   title: 'INSPIRE reference vocabulary',
