@@ -86,10 +86,10 @@ const urls = (list: readonly RawUrl[] | undefined): { description?: string; url:
     return url === undefined ? [] : [{ url, ...opt('description', str(entry.description)) }];
   });
 
-/** Text cut to `max` characters at a word boundary, with whether it was cut. */
-function snippet(text: string, max = SNIPPET_CHARS): { text: string; truncated: boolean } {
-  if (text.length <= max) return { text, truncated: false };
-  let cut = text.slice(0, max);
+/** Text cut to `SNIPPET_CHARS` characters at a word boundary, with whether it was cut. */
+function snippet(text: string): { text: string; truncated: boolean } {
+  if (text.length <= SNIPPET_CHARS) return { text, truncated: false };
+  let cut = text.slice(0, SNIPPET_CHARS);
   const lastSpace = cut.search(/\s\S*$/);
   if (lastSpace > 0) cut = cut.slice(0, lastSpace);
   else if (isHighSurrogate(cut.charCodeAt(cut.length - 1))) cut = cut.slice(0, -1);

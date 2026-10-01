@@ -434,6 +434,14 @@ describe('surname-miss notice', () => {
     expect(out.notice).toBe(surnameMiss('Qzxwvbnm Plkjhgf'));
   });
 
+  it('does not count a short particle shared with the query', async () => {
+    routePage(authorPage([named(1, 'de Gennes, Pierre')]));
+
+    const out = structured<Output>(await run({ query: 'de Souza' }));
+
+    expect(out.notice).toBe(surnameMiss('de Souza'));
+  });
+
   it('does not count a surname that the query only begins', async () => {
     routePage(authorPage([named(1, 'Maldacena, Juan')]));
 
@@ -452,6 +460,9 @@ describe('surname-miss notice', () => {
     ['accents the profile leaves out', 'Pötosi', 'Potosi, Quray'],
     ['a hyphen written as a space', 'Garcia Bellido, Juan', 'García-Bellido, Juan'],
     ['a particle with an apostrophe', "Gerard 't Hooft", "'t Hooft, Gerard"],
+    ['the last part of a multi-part surname', 'Hooft', "'t Hooft, Gerard"],
+    ['one part of a double surname', 'Garcia, Juan', 'García-Bellido, Juan'],
+    ['a two-letter surname', 'Li, Wei', 'Li, Wei'],
     ['a profile name without a comma', 'Jane Ghosh', 'Ghosh'],
   ])(
     'sets no surname notice when one profile carries the surname: %s',

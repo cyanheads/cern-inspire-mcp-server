@@ -133,16 +133,26 @@ const nameParts = (text: string): string[] =>
     .split(/[^\p{L}\p{N}]+/u)
     .filter(Boolean);
 
+/** Family-name parts shorter than this (`'t`, `de`) don't identify a surname on their own. */
+const MIN_SURNAME_PART = 3;
+
 /**
- * True when some profile's family name (its `name` before the comma) appears as
- * a run of the query's name parts. The run may sit anywhere in the query, since
- * a free-text name arrives as "Last, First", "First Last", or a bare surname.
+ * True when some profile's family name (its `name` before the comma) appears in
+ * the query: as a whole run of the query's name parts, or through any one of its
+ * parts at least {@link MIN_SURNAME_PART} long, so `Hooft` finds `'t Hooft` and a
+ * two-letter surname still needs the whole run. The match may sit anywhere in the
+ * query, since a free-text name arrives as "Last, First", "First Last", or a bare surname.
  */
 function carriesQueriedSurname(query: string, authors: readonly { name: string }[]): boolean {
-  const queryParts = nameParts(query).join(' ');
+  const queryParts = nameParts(query);
+  const queryRun = ` ${queryParts.join(' ')} `;
   return authors.some((a) => {
-    const family = nameParts(a.name.split(',')[0] ?? '').join(' ');
-    return family !== '' && ` ${queryParts} `.includes(` ${family} `);
+    const family = nameParts(a.name.split(',')[0] ?? '');
+    if (family.length === 0) return false;
+    return (
+      queryRun.includes(` ${family.join(' ')} `) ||
+      family.some((part) => part.length >= MIN_SURNAME_PART && queryParts.includes(part))
+    );
   });
 }
 
@@ -308,7 +318,24 @@ export const searchAuthorsTool = tool('cern_inspire_search_authors', {
       deletedDropped: result.deletedDropped,
     });
 
+    const truncated = result.total > shown + result.deletedDropped;
     const notices: string[] = [];
+    if (
+      result.matchedAs === 'name' &&
+      shown > 0 &&
+      !carriesQueriedSurname(input.query, result.authors)
+    ) {
+      notices.push(
+        `No profile on this page has a surname in "${inline(input.query)}"; INSPIRE widened the match by reading name parts as initials, so these may be other people. Check the spelling, or search by BAI or ORCID.`,
+      );
+    }
+    if (truncated) {
+      notices.push(
+        input.limit < MAX_LIMIT
+          ? `More profiles matched; raise limit (max ${MAX_LIMIT}), add name parts, or search by BAI or ORCID to pin one person.`
+          : 'More profiles matched than the 25 returned; add name parts, or search by BAI or ORCID to pin one person.',
+      );
+    }
     if (result.total === 0) {
       notices.push(
         `No INSPIRE author profile matched "${inline(input.query)}" as ${result.matchedAs}.`,
@@ -318,24 +345,6 @@ export const searchAuthorsTool = tool('cern_inspire_search_authors', {
     if (result.deletedDropped > 0) {
       notices.push(
         `${result.deletedDropped} matching profile${result.deletedDropped === 1 ? ' is' : 's are'} marked deleted in INSPIRE and ${result.deletedDropped === 1 ? 'was' : 'were'} dropped from this result.`,
-      );
-    }
-
-    const truncated = result.total > shown + result.deletedDropped;
-    if (truncated) {
-      notices.unshift(
-        input.limit < MAX_LIMIT
-          ? `More profiles matched; raise limit (max ${MAX_LIMIT}), add name parts, or search by BAI or ORCID to pin one person.`
-          : 'More profiles matched than the 25 returned; add name parts, or search by BAI or ORCID to pin one person.',
-      );
-    }
-    if (
-      result.matchedAs === 'name' &&
-      shown > 0 &&
-      !carriesQueriedSurname(input.query, result.authors)
-    ) {
-      notices.unshift(
-        `No profile on this page has a surname in "${inline(input.query)}"; INSPIRE widened the match by reading name parts as initials, so these may be other people. Check the spelling, or search by BAI or ORCID.`,
       );
     }
 
