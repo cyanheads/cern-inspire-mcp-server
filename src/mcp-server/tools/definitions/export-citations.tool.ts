@@ -8,8 +8,8 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { blankAsUnset } from '@/mcp-server/tools/inputs.js';
-import { fenced, inline } from '@/mcp-server/tools/render.js';
 import { getInspireService } from '@/services/inspire/inspire-service.js';
+import { fenced, inline } from '@/utils/render.js';
 
 const FORMATS = ['bibtex', 'latex-eu', 'latex-us'] as const;
 const SORTS = ['relevance', 'mostrecent', 'mostcited'] as const;

@@ -5,6 +5,7 @@
  * @module services/inspire/normalize
  */
 
+import { serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import type { PaperIdKind } from './identifiers.js';
 import type {
   AuthorPosition,
@@ -75,10 +76,32 @@ const recidFromRef = (ref: RawRef | undefined): string | undefined =>
 const idOf = (ids: readonly RawId[] | undefined, schema: string): string | undefined =>
   str(ids?.find((id) => id.schema === schema && str(id.value))?.value);
 
-const recidOf = (controlNumber: number | undefined, hitId: string | undefined): string => {
-  const n = num(controlNumber);
-  return n === undefined ? (hitId ?? '') : String(n);
-};
+/** An INSPIRE record ID: 1 to 10 digits. */
+const RECID = /^\d{1,10}$/;
+
+/**
+ * The first candidate that reads as an INSPIRE recid — a number or a string of
+ * 1 to 10 digits — else `undefined`. A recid is printed in the output and spliced
+ * into follow-up queries, so nothing else passes for one.
+ */
+export function readRecid(...candidates: unknown[]): string | undefined {
+  for (const candidate of candidates) {
+    const text = typeof candidate === 'number' ? String(candidate) : candidate;
+    if (typeof text === 'string' && RECID.test(text)) return text;
+  }
+  return;
+}
+
+/** The recid of a record the output names: `control_number`, else the hit `id`; unreadable without one. */
+function recidOf(controlNumber: unknown, hitId: unknown): string {
+  const recid = readRecid(controlNumber, hitId);
+  if (recid === undefined) {
+    throw serviceUnavailable('INSPIRE returned a record without a readable recid.', {
+      reason: 'upstream_unreadable',
+    });
+  }
+  return recid;
+}
 
 const urls = (list: readonly RawUrl[] | undefined): { description?: string; url: string }[] =>
   (list ?? []).flatMap((entry) => {
@@ -179,7 +202,6 @@ const hepdataRecordUrl = (paperRecid: string) => `${HEPDATA_WEB}/record/ins${pap
 export function toLiteratureHit(hit: RawHit<RawLiteratureMetadata>): LiteratureHit {
   const m = hit.metadata ?? {};
   const firstAuthorName = str(m.first_author?.full_name);
-  const firstAuthorRecid = num(m.first_author?.recid);
   const arxiv = m.arxiv_eprints?.find((e) => str(e.value));
   const abstract = pickAbstract(m.abstracts);
   const cut = abstract ? snippet(abstract.value) : undefined;
@@ -190,7 +212,7 @@ export function toLiteratureHit(hit: RawHit<RawLiteratureMetadata>): LiteratureH
       ? {
           firstAuthor: {
             name: firstAuthorName,
-            ...opt('recid', firstAuthorRecid === undefined ? undefined : String(firstAuthorRecid)),
+            ...opt('recid', readRecid(m.first_author?.recid)),
           },
         }
       : {}),
@@ -307,7 +329,7 @@ export function toHepdataAvailability(
   const { hepdataRecid: _omitted, ...facts } = hepdataDoiFacts(hit.metadata?.dois);
   return {
     status: 'available',
-    inspireDataRecid: recidOf(hit.metadata?.control_number, hit.id),
+    ...opt('inspireDataRecid', readRecid(hit.metadata?.control_number, hit.id)),
     ...facts,
     hepdataUrl: hepdataRecordUrl(paperRecid),
   };
@@ -404,7 +426,7 @@ function toTotals(set: RawCitationBucketSet | undefined): CitationTotals {
 
 function toBuckets(set: RawCitationBucketSet | undefined): CitationBucket[] {
   return (set?.citation_buckets?.buckets ?? []).flatMap((bucket) => {
-    const range = bucket.key === undefined ? undefined : CITATION_BUCKET_KEYS[bucket.key];
+    const range = bucket.key === undefined ? undefined : CITATION_BUCKET_KEYS.get(bucket.key);
     return range === undefined ? [] : [{ range, papers: num(bucket.doc_count) ?? 0 }];
   });
 }
@@ -438,6 +460,16 @@ const ONGOING_SENTINEL = '9999';
  */
 const ongoingFrom = (completed: string | undefined): boolean | undefined =>
   completed === undefined ? undefined : completed === ONGOING_SENTINEL;
+
+/**
+ * The literature query for an experiment's papers: its legacy name as a quoted
+ * clause. Absent without a legacy name, or when the name holds a `"` or `\`,
+ * which would end or escape the quotes and select other papers.
+ */
+const experimentLiteratureQuery = (legacyName: string): string | undefined =>
+  legacyName === '' || /["\\]/.test(legacyName)
+    ? undefined
+    : `accelerator_experiments.legacy_name:"${legacyName}"`;
 
 export function toExperimentRecord(hit: RawHit<RawExperimentMetadata>): ExperimentRecord {
   const m = hit.metadata ?? {};
@@ -475,7 +507,7 @@ export function toExperimentRecord(hit: RawHit<RawExperimentMetadata>): Experime
     urls: urls(m.urls),
     nameVariants: strings(m.name_variants),
     ...opt('core', bool(m.core)),
-    literatureQuery: `accelerator_experiments.legacy_name:"${legacyName}"`,
+    ...opt('literatureQuery', experimentLiteratureQuery(legacyName)),
   };
 }
 
@@ -484,8 +516,8 @@ export function toExperimentRecord(hit: RawHit<RawExperimentMetadata>): Experime
 export function toHepdataRecord(hit: RawHit<RawDataMetadata>): HepdataRecord {
   const m = hit.metadata ?? {};
   const paperRecids = (m.literature ?? []).flatMap((l) => {
-    const n = num(l.control_number);
-    return n === undefined ? [] : [String(n)];
+    const recid = readRecid(l.control_number);
+    return recid === undefined ? [] : [recid];
   });
   const abstract = values(m.abstracts)[0];
   const cut = abstract === undefined ? undefined : snippet(abstract);

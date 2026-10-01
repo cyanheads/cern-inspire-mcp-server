@@ -765,6 +765,31 @@ describe('the summary and format() parity', () => {
     expect(bodyText(result)).not.toContain('7–8');
   });
 
+  it('drops a bucket key named after an Object.prototype member', async () => {
+    const body = summary((aggregation) => {
+      aggregation.citations?.buckets?.all?.citation_buckets?.buckets?.push(
+        ...['constructor', 'toString', '__proto__', 'hasOwnProperty', 'valueOf'].map((key) => ({
+          key,
+          doc_count: 9,
+        })),
+      );
+    });
+    routeSummary(body);
+
+    const result = await run({ query: 'x' });
+
+    expect(structured<Output>(result).buckets.all.map((b) => b.range)).toEqual([
+      '0',
+      '1–9',
+      '10–49',
+      '50–99',
+      '100–249',
+      '250–499',
+      '500+',
+    ]);
+    expect(bodyText(result)).not.toContain('function');
+  });
+
   it('renders no bucket table when INSPIRE sends no buckets at all', async () => {
     const body = summary((aggregation) => {
       aggregation.citations = {};

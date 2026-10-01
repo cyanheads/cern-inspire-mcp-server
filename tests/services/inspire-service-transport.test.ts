@@ -110,7 +110,7 @@ describe('400 and 429 mapping', () => {
     expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
     expect(error.data).toMatchObject({ reason: 'invalid_query', upstreamMessage: body });
     expect(error.message).toBe(
-      'INSPIRE rejected the request: <html> <head> <title>Bad request</title> </head> <body> x</body> </html>',
+      'INSPIRE rejected the request: &lt;html&gt; &lt;head&gt; &lt;title&gt;Bad request&lt;/title&gt; &lt;/head&gt; &lt;body&gt; x&lt;/body&gt; &lt;/html&gt;',
     );
     expect(error.message).not.toMatch(new RegExp(`[\\r\\n${NEL}${LS}]`));
   });
@@ -123,6 +123,35 @@ describe('400 and 429 mapping', () => {
     expect((error.data as { upstreamMessage: string }).upstreamMessage).toBe(
       '{"status":400,"errors":[]}',
     );
+  });
+
+  it('cuts a long JSON 400 message to 300 characters and escapes its markup in the error text', async () => {
+    const message = `[x](https://e) <b>bold</b> ${'y'.repeat(10_000)}`;
+    h.route('/literature', jsonResponse(badRequestBody(message), { status: 400 }));
+
+    const error = errorOf(await settle(() => search()));
+
+    expect((error.data as { upstreamMessage: string }).upstreamMessage).toBe(message.slice(0, 300));
+    expect(error.message.length).toBeLessThan(350);
+    expect(error.message).toMatch(
+      /^INSPIRE rejected the request: \\\[x\\\]\(https:\/\/e\) &lt;b&gt;bold&lt;\/b&gt; y+$/,
+    );
+  });
+
+  it('flattens a JSON 400 message to one line, and drops tag and other format characters', async () => {
+    const tags = [...'hidden'].map((c) => String.fromCodePoint(0xe0000 + c.charCodeAt(0))).join('');
+    const ZWSP = String.fromCharCode(0x200b);
+    h.route(
+      '/literature',
+      jsonResponse(badRequestBody(`Bad${tags} size\n# Heading${ZWSP}`), { status: 400 }),
+    );
+
+    const error = errorOf(await settle(() => search()));
+
+    expect((error.data as { upstreamMessage: string }).upstreamMessage).toBe(
+      `Bad size\n# Heading${ZWSP}`,
+    );
+    expect(error.message).toBe('INSPIRE rejected the request: Bad size # Heading');
   });
 
   it('maps a 429 with Retry-After to RateLimited inspire_rate_limited carrying that wait', async () => {

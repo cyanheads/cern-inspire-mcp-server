@@ -13,6 +13,7 @@ import {
   normalizeAuthorId,
   normalizePaperId,
   PAPER_ID_PATTERN,
+  paperIdKey,
   routeAuthorQuery,
 } from '@/services/inspire/identifiers.js';
 
@@ -165,18 +166,50 @@ describe('classifyPaperId', () => {
     '451647 ',
     '-1',
     '1e5',
+    // INSPIRE reads * and ? in a DOI clause as wildcards, so they never reach it
+    '10.1016/*',
+    '10.1016/j.physletb.2012.08.*',
+    '10.1016/j.physletb.2012.08.02?',
+    '10.1016/?',
   ])('classifies %j as nothing', (id) => {
     expect(classifyPaperId(id)).toBeUndefined();
+    expect(PAPER_ID_PATTERN.test(id)).toBe(false);
   });
 
   it('agrees with PAPER_ID_PATTERN on arbitrary identifier-shaped strings', () => {
-    const alphabet = fc.constantFrom(...'0123456789.-/vabhepthAGMdoi10 ');
+    const alphabet = fc.constantFrom(...'0123456789.-/vabhepthAGMdoi10 *?');
     fc.assert(
       fc.property(fc.string({ unit: alphabet, maxLength: 24 }), (text) => {
         expect(PAPER_ID_PATTERN.test(text)).toBe(classifyPaperId(text) !== undefined);
       }),
       { numRuns: 2_000 },
     );
+  });
+});
+
+describe('paperIdKey', () => {
+  it.each([
+    ['doi', DOI, DOI],
+    ['doi', '10.1016/J.PHYSLETB.2012.08.020', DOI],
+    // trailing prose punctuation, which INSPIRE's doi: match passes over
+    ['doi', `${DOI})`, DOI],
+    ['doi', `${DOI}.`, DOI],
+    ['doi', `${DOI}).`, DOI],
+    ['doi', `${DOI};`, DOI],
+    ['doi', `${DOI}]`, DOI],
+    // punctuation inside a DOI stays
+    ['doi', '10.1016/S0370-2693(98)00377-3', '10.1016/s0370-2693(98)00377-3'],
+    ['arxiv', '1207.7214', '1207.7214'],
+    ['arxiv', 'hep-th/9711200', 'hep-th/9711200'],
+    // the subject class is not part of an old-style arXiv identifier
+    ['arxiv', 'math.AG/0601001', 'math/0601001'],
+    ['arxiv', 'math/0601001', 'math/0601001'],
+  ] as const)('keys the %s %j as %j', (kind, id, key) => {
+    expect(paperIdKey(kind, id)).toBe(key);
+  });
+
+  it('keys two different DOIs apart', () => {
+    expect(paperIdKey('doi', DOI)).not.toBe(paperIdKey('doi', '10.1016/j.physletb.2013.02.037'));
   });
 });
 

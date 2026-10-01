@@ -12,11 +12,12 @@ export type PaperIdKind = 'recid' | 'arxiv' | 'doi';
 const RECID = /^\d{1,9}$/;
 const NEW_ARXIV = /^\d{4}\.\d{4,5}$/;
 const OLD_ARXIV = /^[a-z-]+(?:\.[A-Z]{2})?\/\d{7}$/;
-const DOI = /^10\.\d{4,9}\/\S+$/;
+/** A DOI; `*` and `?` are refused, since INSPIRE reads them in a `doi:` clause as wildcards. */
+const DOI = /^10\.\d{4,9}\/[^\s*?]+$/;
 
-/** A normalized paper identifier: recid, new or old arXiv ID, or DOI. */
+/** A normalized paper identifier: recid, new or old arXiv ID, or DOI without `*` or `?`. */
 export const PAPER_ID_PATTERN =
-  /^(?:\d{1,9}|\d{4}\.\d{4,5}|[a-z-]+(?:\.[A-Z]{2})?\/\d{7}|10\.\d{4,9}\/\S+)$/;
+  /^(?:\d{1,9}|\d{4}\.\d{4,5}|[a-z-]+(?:\.[A-Z]{2})?\/\d{7}|10\.\d{4,9}\/[^\s*?]+)$/;
 
 /**
  * Reduces the accepted spellings of a paper identifier to its bare form: trims,
@@ -57,6 +58,20 @@ export function classifyPaperId(id: string): PaperIdKind | undefined {
   if (NEW_ARXIV.test(id) || OLD_ARXIV.test(id)) return 'arxiv';
   if (DOI.test(id)) return 'doi';
   return;
+}
+
+/**
+ * The form an arXiv ID or DOI is compared in when checking that a record carries
+ * the identifier asked for: lower-cased; an old-style arXiv subject class dropped
+ * (`math.AG/0601001` is `math/0601001`, the class is not part of the ID); and a
+ * DOI's trailing prose punctuation dropped (`.`, `,`, `;`, `:`, `)`, `]`), which
+ * INSPIRE's `doi:` match also passes over.
+ */
+export function paperIdKey(kind: Exclude<PaperIdKind, 'recid'>, id: string): string {
+  const lower = id.toLowerCase();
+  return kind === 'arxiv'
+    ? lower.replace(/^([a-z-]+)\.[a-z]{2}(?=\/)/, '$1')
+    : lower.replace(/[.,;:)\]]+$/, '');
 }
 
 /** How an author query was routed: one of the identifier forms, or a free-text name. */

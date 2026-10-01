@@ -392,7 +392,8 @@ export interface ExperimentRecord {
   description?: string;
   institutions: { name: string; recid?: string }[];
   legacyName: string;
-  literatureQuery: string;
+  /** Absent without a legacy name, or when the name holds a `"` or `\`. */
+  literatureQuery?: string;
   longName?: string;
   name?: string;
   nameVariants: string[];

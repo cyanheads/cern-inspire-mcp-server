@@ -17,11 +17,11 @@ import {
   yearFromInput,
   yearToInput,
 } from '@/mcp-server/tools/inputs.js';
-import { cell, inline } from '@/mcp-server/tools/render.js';
 import { containsOrcid, routeAuthorQuery } from '@/services/inspire/identifiers.js';
 import { getInspireService } from '@/services/inspire/inspire-service.js';
 import type { FacetFilters } from '@/services/inspire/types.js';
 import { CITATION_BUCKET_RANGES } from '@/services/inspire/vocabulary.js';
+import { cell, inline } from '@/utils/render.js';
 
 const totalsSchema = (scope: string) =>
   z

@@ -10,8 +10,8 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { blankAsUnset, paperInput } from '@/mcp-server/tools/inputs.js';
-import { inline, printUrl, quote } from '@/mcp-server/tools/render.js';
 import { getInspireService } from '@/services/inspire/inspire-service.js';
+import { atLineStart, inline, printUrl, quote } from '@/utils/render.js';
 
 /** Upper bound on `max_authors`; the full count is always in `authorCount`. */
 const MAX_AUTHORS_LIMIT = 500;
@@ -199,7 +199,7 @@ function renderPublication(p: PaperDossierOutput['publications'][number]): strin
     p.articleId && `article ${inline(p.articleId)}`,
   ].filter(Boolean);
   if (p.freetext) parts.push(`${parts.length > 0 ? '— ' : ''}${inline(p.freetext)}`);
-  return `- ${parts.join(' ')}`;
+  return `- ${atLineStart(parts.join(' '))}`;
 }
 
 function renderAuthor(a: PaperDossierOutput['authors'][number]): string {
@@ -304,7 +304,7 @@ function renderPaperDossier(paper: PaperDossierOutput): string {
     ...paper.authors.map(renderAuthor),
   );
   if (paper.keywords.length > 0) {
-    lines.push('', '### Keywords', paper.keywords.map(inline).join('; '));
+    lines.push('', `**Keywords:** ${paper.keywords.map(inline).join('; ')}`);
   }
   if (paper.texkeys.length > 0) {
     lines.push('', `**Texkeys:** ${paper.texkeys.map(inline).join(', ')}`);
@@ -314,7 +314,8 @@ function renderPaperDossier(paper: PaperDossierOutput): string {
       '',
       '### Links',
       ...paper.urls.map(
-        (u) => `- ${printUrl(u.url)}${u.description ? ` — ${inline(u.description)}` : ''}`,
+        (u) =>
+          `- ${atLineStart(printUrl(u.url))}${u.description ? ` — ${inline(u.description)}` : ''}`,
       ),
     );
   }
@@ -327,7 +328,7 @@ function renderPaperDossier(paper: PaperDossierOutput): string {
           l.material && `for the ${inline(l.material)}`,
           l.imposing && `imposed by ${inline(l.imposing)}`,
         ].filter(Boolean);
-        return `- ${printUrl(l.url)}${details.length > 0 ? ` (${details.join(' · ')})` : ''}`;
+        return `- ${atLineStart(printUrl(l.url))}${details.length > 0 ? ` (${details.join(' · ')})` : ''}`;
       }),
     );
   }

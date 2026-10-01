@@ -1,10 +1,12 @@
 /**
  * @fileoverview Markdown rendering for upstream-authored and caller-supplied text
  * in every tool's `format()`. INSPIRE and HEPData strings are data, never
- * markup: inline slots are flattened to one line with link, HTML, and control
- * characters neutralized; free text is blockquoted; citation entries are fenced.
- * `structuredContent` never passes through here and keeps strings verbatim.
- * @module mcp-server/tools/render
+ * markup: inline slots are flattened to one line with link, HTML, control, and
+ * invisible format characters neutralized; text that opens a line or list item
+ * cannot open a block; free text is blockquoted; citation entries are fenced.
+ * `structuredContent` never passes through here and keeps strings as decoded.
+ * The service also uses `inline()` for upstream text it puts in an error message.
+ * @module utils/render
  */
 
 /**
@@ -16,21 +18,20 @@ const charClass = (ranges: readonly (readonly [number, number])[]): string =>
 
 /**
  * Stripped everywhere: C0 controls except tab, LF, and CR; DEL; C1 controls
- * except NEL; and the bidi marks, embeddings, overrides, and isolates
- * (U+200E–200F, U+202A–202E, U+2066–2069).
+ * except NEL; and every format character (`\p{Cf}`: bidi marks, embeddings,
+ * overrides, and isolates, zero-width spaces, the word joiner and invisible
+ * operators, the byte-order mark, soft hyphens, tag characters) except ZWNJ and
+ * ZWJ (U+200C–200D), which Persian, Arabic, and Indic names need.
  */
 const STRIPPED = new RegExp(
-  charClass([
+  `${charClass([
     [0x00, 0x08],
     [0x0b, 0x0c],
     [0x0e, 0x1f],
     [0x7f, 0x84],
     [0x86, 0x9f],
-    [0x200e, 0x200f],
-    [0x202a, 0x202e],
-    [0x2066, 0x2069],
-  ]),
-  'g',
+  ])}|(?![\\u{200C}\\u{200D}])\\p{Cf}`,
+  'gu',
 );
 
 /** Line breaks: CRLF, then CR, LF, NEL (U+0085), LINE SEPARATOR, PARAGRAPH SEPARATOR (U+2028–2029). */
@@ -46,13 +47,18 @@ const LINE_BREAK = new RegExp(
 
 /**
  * Backslash-escapes `chars`, doubling any backslash run directly before one so an
- * upstream backslash cannot cancel the escape (`\]` must not become `\\]`).
+ * upstream backslash cannot cancel the escape (`\]` must not become `\\]`). One
+ * pass that consumes each backslash run whole, so a long run costs linear time.
  */
 function escapeWithBackslash(text: string, chars: string): string {
   const set = chars.replace(/[\\\]^-]/g, '\\$&');
-  return text
-    .replace(new RegExp(`\\\\+(?=[${set}])`, 'g'), (run) => run + run)
-    .replace(new RegExp(`[${set}]`, 'g'), '\\$&');
+  return text.replace(
+    new RegExp(`(\\\\+)([${set}])?|[${set}]`, 'g'),
+    (match, run: string | undefined, char: string | undefined) => {
+      if (run === undefined) return `\\${match}`;
+      return char === undefined ? run : `${run}${run}\\${char}`;
+    },
+  );
 }
 
 /** Stripping and escaping shared by `inline()` and `quote()`; line breaks untouched. */
@@ -64,7 +70,7 @@ function neutralize(text: string): string {
 
 /**
  * Text for an inline slot — a heading, bold name, list item, or a value
- * interpolated into a sentence: line breaks become one space, control and bidi
+ * interpolated into a sentence: line breaks become one space, control and format
  * characters are stripped, `[` `]` are escaped, `<` `>` become entities.
  */
 export function inline(text: string): string {
@@ -85,7 +91,7 @@ export function quote(text: string): string {
 }
 
 /**
- * A fenced code block — for verbatim citation entries. Control and bidi
+ * A fenced code block — for verbatim citation entries. Control and format
  * characters are stripped; the fence is one backtick longer than the longest
  * backtick run in the text (minimum three).
  */
@@ -97,9 +103,31 @@ export function fenced(text: string, language: string): string {
 }
 
 /**
- * A URL printed as text: controls stripped; `[` `]` `<` `>` `|`, whitespace, and
- * NEL (U+0085, a line break `\s` does not match) percent-encoded.
+ * A URL printed as text: control and format characters stripped; `[` `]` `<`
+ * `>` `|`, whitespace, and NEL (U+0085, a line break `\s` does not match)
+ * percent-encoded.
  */
 export function printUrl(url: string): string {
   return url.replace(STRIPPED, '').replace(/[[\]<>|\s\u0085]/g, encodeURIComponent);
+}
+
+/**
+ * A block marker a markdown line can open with once its indentation is gone: an
+ * ATX heading, a bullet, a code fence, or a thematic break or setext underline.
+ * A backslash before its first character keeps the line a paragraph.
+ */
+const BLOCK_MARKER = /^(?:#{1,6}(?= |$)|[-+*](?= |$)|`{3}|~{3}|([-*_=])(?: *\1)* *$)/;
+
+/** An ordered-list marker; its `.` or `)` takes the backslash, since `\1` is no escape. */
+const ORDERED_MARKER = /^(\d{1,9})([.)])(?= |$)/;
+
+/**
+ * Rendered inline text (`inline()` or `printUrl()` output) placed at the start
+ * of a line or list item: leading spaces removed, since four would open a code
+ * block, and a leading block marker escaped, so upstream text cannot open a
+ * heading, list, fence, or rule there. Text inside it is left as it is.
+ */
+export function atLineStart(markdown: string): string {
+  const text = markdown.replace(/^ +/, '');
+  return BLOCK_MARKER.test(text) ? `\\${text}` : text.replace(ORDERED_MARKER, '$1\\$2');
 }

@@ -65,10 +65,12 @@ export const inspireLiteratureResource = resource('inspire://literature/{recid}'
 
   async handler(params, ctx) {
     const inspire = getInspireService();
+    // A body is cached publicly for an hour, so a failed HEPData lookup fails the read instead.
     const lookup = await inspire.getPaper(
       params.recid,
       RESOURCE_MAX_AUTHORS,
       inspire.beginCall(ctx),
+      { requireHepdata: true },
     );
     if (!lookup) {
       throw ctx.fail('paper_not_found', `No INSPIRE literature record has recid ${params.recid}.`, {

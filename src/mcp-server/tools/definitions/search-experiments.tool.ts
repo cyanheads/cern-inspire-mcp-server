@@ -9,8 +9,8 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { blankAsUnset } from '@/mcp-server/tools/inputs.js';
-import { inline, printUrl, quote } from '@/mcp-server/tools/render.js';
 import { getInspireService } from '@/services/inspire/inspire-service.js';
+import { atLineStart, inline, printUrl, quote } from '@/utils/render.js';
 
 const MAX_LIMIT = 25;
 
@@ -85,8 +85,9 @@ const experimentSchema = z
     core: z.boolean().optional().describe('True when INSPIRE marks the record as core HEP.'),
     literatureQuery: z
       .string()
+      .optional()
       .describe(
-        "Literature query selecting this experiment's papers; pass to cern_inspire_search_literature, or as query to cern_inspire_get_citation_summary.",
+        "Literature query selecting this experiment's papers; pass to cern_inspire_search_literature, or as query to cern_inspire_get_citation_summary. Absent when the record has no legacy name, or the name holds a quote or backslash that cannot sit inside the query's quoted clause.",
       ),
   })
   .describe('One matching experiment record.');
@@ -146,12 +147,13 @@ function renderExperiment(e: ExperimentOutput, position: number): string[] {
   if (e.nameVariants.length > 0) {
     lines.push(`**Name variants:** ${e.nameVariants.map(inline).join(', ')}`);
   }
-  lines.push(`**Literature query:** ${inline(e.literatureQuery)}`);
+  if (e.literatureQuery) lines.push(`**Literature query:** ${inline(e.literatureQuery)}`);
   if (e.urls.length > 0) {
     lines.push(
       '**URLs:**',
       ...e.urls.map(
-        (u) => `- ${printUrl(u.url)}${u.description ? ` — ${inline(u.description)}` : ''}`,
+        (u) =>
+          `- ${atLineStart(printUrl(u.url))}${u.description ? ` — ${inline(u.description)}` : ''}`,
       ),
     );
   }

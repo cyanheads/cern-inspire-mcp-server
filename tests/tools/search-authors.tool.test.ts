@@ -825,6 +825,36 @@ describe('upstream text stays out of inline markdown slots', () => {
       `https://example.org/a${NEL}b c[d]<e>|f`,
     );
   });
+
+  it('keeps a position, advisor, or link that opens a list item from starting a block', async () => {
+    routePage(
+      authorPage([
+        authorMetadata({
+          positions: [
+            { institution: '# Forged heading', current: true },
+            { institution: '    indented code' },
+          ],
+          advisors: [{ name: '1. Roe, Richard' }],
+          urls: [{ value: '```' }],
+        }),
+      ]),
+    );
+
+    const result = await run({ query: 'Doe' });
+
+    const body = lines(result);
+    expect(body.filter((line) => line.startsWith('#'))).toEqual([
+      '## INSPIRE author profiles (1)',
+      '### 1. Doe, Jane (preferred: Jane Doe)',
+    ]);
+    expect(body).toContain('- \\# Forged heading');
+    expect(body).toContain('- indented code');
+    expect(body).toContain('- 1\\. Roe, Richard');
+    expect(body).toContain('- \\```');
+    expect(structured<Output>(result).authors[0]?.currentPositions[0]?.institution).toBe(
+      '# Forged heading',
+    );
+  });
 });
 
 describeFailureClasses({

@@ -303,7 +303,7 @@ const REFERENCE: Record<Topic, Entry[]> = {
     {
       term: 'table values',
       meaning:
-        'Live on hepdata.net. This server does not read them: send the user to the hepdataUrl or the record DOI that cern_inspire_get_paper and cern_inspire_search_hepdata return.',
+        'Live on hepdata.net; this server does not read them. cern_inspire_get_paper and cern_inspire_search_hepdata return hepdataUrl, the record page that holds them, and the record DOI.',
     },
     {
       term: 'search',

@@ -62,13 +62,16 @@ export const CITATION_BUCKET_RANGES = [
 
 export type CitationBucketRange = (typeof CITATION_BUCKET_RANGES)[number];
 
-/** Upstream citation-summary bucket key → output range label. */
-export const CITATION_BUCKET_KEYS: Readonly<Record<string, CitationBucketRange>> = {
-  '0--0': '0',
-  '1--9': '1–9',
-  '10--49': '10–49',
-  '50--99': '50–99',
-  '100--249': '100–249',
-  '250--499': '250–499',
-  '500--': '500+',
-};
+/**
+ * Upstream citation-summary bucket key → output range label. A `Map`, since the
+ * key comes from the response: an object literal would answer `constructor`.
+ */
+export const CITATION_BUCKET_KEYS: ReadonlyMap<string, CitationBucketRange> = new Map([
+  ['0--0', '0'],
+  ['1--9', '1–9'],
+  ['10--49', '10–49'],
+  ['50--99', '50–99'],
+  ['100--249', '100–249'],
+  ['250--499', '250–499'],
+  ['500--', '500+'],
+]);

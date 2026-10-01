@@ -23,21 +23,22 @@ export const blankAsUnset = <T extends z.ZodType>(schema: T) =>
   z.preprocess((value) => (value === '' ? undefined : value), schema);
 
 /**
- * One paper identifier, normalized before the pattern check (see
- * `normalizePaperId`): recid, new or old arXiv ID, or DOI.
+ * One paper identifier, normalized before the length and pattern checks (see
+ * `normalizePaperId`): recid, new or old arXiv ID, or DOI, at most 256 characters.
  */
 export const paperInput = z
   .preprocess(
     (value) => (typeof value === 'string' ? normalizePaperId(value) : value),
     z
       .string()
+      .max(256)
       .regex(
         PAPER_ID_PATTERN,
         'Expected an INSPIRE recid (451647), an arXiv ID (1207.7214 or hep-th/9711200), or a DOI (10.1016/…).',
       ),
   )
   .describe(
-    "INSPIRE recid (e.g. 451647), arXiv ID (1207.7214 or hep-th/9711200, with or without 'arXiv:', a version suffix, or an arxiv.org URL), DOI (10.1016/…, with or without 'doi:' or a doi.org prefix), an inspirehep.net literature URL, or HEPData's ins<recid> form or hepdata.net record URL.",
+    "INSPIRE recid (e.g. 451647), arXiv ID (1207.7214 or hep-th/9711200, with or without 'arXiv:', a version suffix, or an arxiv.org URL), DOI (10.1016/…, with or without 'doi:' or a doi.org prefix; no * or ? wildcards), an inspirehep.net literature URL, or HEPData's ins<recid> form or hepdata.net record URL. Up to 256 characters.",
   );
 
 /**

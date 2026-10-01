@@ -19,14 +19,17 @@ import {
   validationError,
 } from '@cyanheads/mcp-ts-core/errors';
 import { createPacer, type Pacer, withRetry } from '@cyanheads/mcp-ts-core/utils';
+import { inline } from '@/utils/render.js';
 import { type BoundedResponse, fetchBounded } from '../http/fetch-bounded.js';
 import {
   type AuthorRoute,
   classifyPaperId,
   normalizePaperId,
+  paperIdKey,
   routeAuthorQuery,
 } from './identifiers.js';
 import {
+  readRecid,
   splitCitationEntries,
   toAuthorProfile,
   toCitationSummary,
@@ -173,6 +176,9 @@ const HEPDATA_SEARCH_FIELDS = [
 
 const HEPDATA_AVAILABILITY_FIELDS = 'control_number,dois.value,dois.material';
 
+/** The recid, plus the identifiers a resolve hit is checked against. */
+const RESOLVE_FIELDS = 'control_number,dois.value,arxiv_eprints.value';
+
 type InspirePath = '/literature' | '/literature/facets' | '/authors' | '/experiments' | '/data';
 
 /** Every query parameter INSPIRE is ever sent. Caller keys never reach the URL. */
@@ -255,13 +261,27 @@ const unreadable = (message: string, cause?: unknown) =>
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
-/** Parses a JSON route's body; HTML or invalid JSON is `upstream_unreadable`. */
+/**
+ * The Unicode tag block (U+E0000–E007F): invisible characters that can spell out
+ * hidden text and have no use in INSPIRE metadata. Dropped from every decoded
+ * string, so `structuredContent` never carries them; other text stays as received.
+ */
+const TAG_CHARACTERS = /[\u{E0000}-\u{E007F}]/gu;
+
+const dropTags = (text: string): string => text.replace(TAG_CHARACTERS, '');
+
+/**
+ * Parses a JSON route's body, dropping tag characters from every string value
+ * (raw or `\u`-escaped); HTML or invalid JSON is `upstream_unreadable`.
+ */
 function parseJson(text: string): unknown {
   if (/^\s*</.test(text)) {
     throw unreadable('INSPIRE returned an HTML page where JSON was expected.');
   }
   try {
-    return JSON.parse(text);
+    return JSON.parse(text, (_key, value: unknown) =>
+      typeof value === 'string' ? dropTags(value) : value,
+    );
   } catch (err) {
     throw unreadable('INSPIRE returned a body that is not valid JSON.', err);
   }
@@ -294,23 +314,43 @@ function parseCitationSummary(text: string): RawCitationSummaryResponse {
   return body as unknown as RawCitationSummaryResponse;
 }
 
-/** An export body must be BibTeX/LaTeX text; JSON or HTML on a 200 is `upstream_unreadable`. */
+/**
+ * An export body must be BibTeX/LaTeX text, returned with tag characters dropped;
+ * JSON or HTML on a 200 is `upstream_unreadable`.
+ */
 function parseExportText(text: string): string {
   if (/^\s*[{[<]/.test(text)) {
     throw unreadable('INSPIRE returned JSON or HTML where citation text was expected.');
   }
-  return text;
+  return dropTags(text);
 }
 
-/** INSPIRE's `message` from a 400 body, or the start of the body when it is not JSON. */
+/**
+ * INSPIRE's `message` from a 400 body, or the body itself when it is not JSON:
+ * tag characters dropped, trimmed, and cut to 300 characters.
+ */
 function upstreamMessage(text: string): string {
+  let message = text;
   try {
     const body: unknown = JSON.parse(text);
-    if (isRecord(body) && typeof body.message === 'string') return body.message;
+    if (isRecord(body) && typeof body.message === 'string') message = body.message;
   } catch {
-    // Not JSON — fall through to the raw text.
+    // Not JSON — the raw text stands.
   }
-  return text.trim().slice(0, 300);
+  return dropTags(message).trim().slice(0, 300);
+}
+
+/** True when a resolve hit lists the requested arXiv ID or DOI among its own. */
+function carriesPaperId(
+  metadata: RawLiteratureMetadata | undefined,
+  kind: 'arxiv' | 'doi',
+  id: string,
+): boolean {
+  const key = paperIdKey(kind, id);
+  const carried = kind === 'doi' ? metadata?.dois : metadata?.arxiv_eprints;
+  return (carried ?? []).some(
+    (entry) => typeof entry.value === 'string' && paperIdKey(kind, entry.value) === key,
+  );
 }
 
 /** `Retry-After` as seconds (delta-seconds or HTTP-date), else INSPIRE's documented 5 s. */
@@ -381,8 +421,9 @@ export class InspireService {
 
   /**
    * Resolves a paper identifier (any form the `paper` input accepts) to a recid.
-   * A recid is returned as-is without a request; an arXiv ID or DOI is looked up.
-   * `undefined` when the arXiv ID or DOI matches no literature record.
+   * A recid is returned as-is without a request; an arXiv ID or DOI is looked up,
+   * and only a hit that carries that identifier itself (with a readable recid)
+   * counts, never whatever INSPIRE ranked first. `undefined` when no hit does.
    */
   async resolvePaper(paper: string, call: InspireCall): Promise<ResolvedPaper | undefined> {
     const id = normalizePaperId(paper);
@@ -394,25 +435,25 @@ export class InspireService {
 
     const envelope = await this.send(
       '/literature',
-      { q: `${kind}:${id}`, fields: 'control_number', size: 2 },
+      { q: `${kind}:${id}`, fields: RESOLVE_FIELDS, size: 2 },
       call,
       'resolvePaper',
       parseSearchEnvelope<RawLiteratureMetadata>,
     );
-    const [first] = envelope.hits.hits;
-    if (!first) return;
-    if (envelope.hits.hits.length > 1) {
-      call.ctx.log.warning(
-        'Paper identifier matched more than one INSPIRE record; using the first',
-        {
-          paper: id,
-          resolvedAs: kind,
-          total: envelope.hits.total,
-        },
-      );
+    const recids = envelope.hits.hits.flatMap((hit) => {
+      const recid = readRecid(hit.metadata?.control_number, hit.id);
+      return recid !== undefined && carriesPaperId(hit.metadata, kind, id) ? [recid] : [];
+    });
+    if (recids.length !== 1 && envelope.hits.hits.length > 0) {
+      call.ctx.log.warning('Paper identifier is not carried by exactly one INSPIRE record', {
+        paper: id,
+        resolvedAs: kind,
+        total: envelope.hits.total,
+        carriers: recids.length,
+      });
     }
-    const recid = first.metadata?.control_number ?? first.id;
-    return recid === undefined ? undefined : { recid: String(recid), resolvedAs: kind };
+    const [recid] = recids;
+    return recid === undefined ? undefined : { recid, resolvedAs: kind };
   }
 
   /**
@@ -420,12 +461,14 @@ export class InspireService {
    * its HEPData availability in parallel. `undefined` when the identifier matches
    * no record. A failed availability lookup degrades to `hepdata.status:
    * 'lookup_failed'` — except a cancelled call or an input-class rejection, which
-   * rethrow. Any failure of the resolve or the record read throws.
+   * rethrow — unless `requireHepdata` is set, when it throws its own error once the
+   * record is known to exist. Any failure of the resolve or the record read throws.
    */
   async getPaper(
     paper: string,
     maxAuthors: number,
     call: InspireCall,
+    options: { requireHepdata?: boolean } = {},
   ): Promise<PaperLookup | undefined> {
     const resolved = await this.resolvePaper(paper, call);
     if (!resolved) return;
@@ -443,6 +486,7 @@ export class InspireService {
     if (record.status === 'rejected') throw record.reason;
     const hit = record.value.hits.hits[0];
     if (!hit?.metadata) return;
+    if (availability.status === 'rejected' && options.requireHepdata) throw availability.reason;
 
     const hepdata: HepdataAvailability =
       availability.status === 'fulfilled'
@@ -541,9 +585,9 @@ export class InspireService {
       parseSearchEnvelope<RawAuthorMetadata>,
     );
     const hit = envelope.hits.hits[0];
-    const recid = hit?.metadata?.control_number ?? hit?.id;
+    const recid = readRecid(hit?.metadata?.control_number, hit?.id);
     if (recid === undefined) return;
-    return { recid: String(recid), name: hit?.metadata?.name?.value ?? '' };
+    return { recid, name: hit?.metadata?.name?.value ?? '' };
   }
 
   /** INSPIRE's citation summary for a literature query under the given facet filters. */
@@ -681,9 +725,9 @@ export class InspireService {
     });
     if (response.status === 400) {
       const message = upstreamMessage(response.text);
-      // A non-JSON 400 body (a proxy's HTML page) carries line breaks; the error text is one line.
+      // The error text reaches content[]: one line, with markup and invisible characters neutralized.
       throw validationError(
-        `INSPIRE rejected the request: ${message.replace(/[\s\u0085]+/g, ' ')}`,
+        `INSPIRE rejected the request: ${inline(message).replace(/\s+/g, ' ')}`,
         {
           reason: 'invalid_query',
           upstreamMessage: message,

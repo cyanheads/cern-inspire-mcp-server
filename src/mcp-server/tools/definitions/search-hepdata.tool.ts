@@ -10,8 +10,8 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { blankAsUnset } from '@/mcp-server/tools/inputs.js';
-import { inline, printUrl, quote } from '@/mcp-server/tools/render.js';
 import { getInspireService } from '@/services/inspire/inspire-service.js';
+import { inline, printUrl, quote } from '@/utils/render.js';
 
 /** INSPIRE serves at most this many results of one query (`page × size`). */
 const RESULT_WINDOW = 10_000;
@@ -107,7 +107,7 @@ function renderRecord(r: HepdataRecordOutput, position: number): string[] {
 export const searchHepdataTool = tool('cern_inspire_search_hepdata', {
   title: 'Search HEPData records',
   description:
-    'Find HEPData measurement records by physics content — process, observable, energy, collaboration — when the paper is unknown, through INSPIRE-HEP\'s index of every HEPData submission. Each hit carries the paper recids (pass to cern_inspire_get_paper), collaborations, keywords (reactions such as "P P --> TOP TOPBAR X", observables, centre-of-mass energies), the HEPData record DOI, latest version, table count, and the hepdata.net record page. This server does not read table values: send the user to the record page or DOI for the numbers. Only the first 10,000 results of a query are reachable.',
+    'Find HEPData measurement records by physics content — process, observable, energy, collaboration — when the paper is unknown, through INSPIRE-HEP\'s index of every HEPData submission. Each hit carries the paper recids (pass to cern_inspire_get_paper), collaborations, keywords (reactions such as "P P --> TOP TOPBAR X", observables, centre-of-mass energies), the HEPData record DOI (recordDoi, the citation for the data), latest version, table count, and hepdataUrl, the hepdata.net record page that holds the table values; this tool does not return the values themselves. Only the first 10,000 results of a query are reachable.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     query: z

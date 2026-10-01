@@ -657,6 +657,27 @@ describe('upstream text stays out of inline markdown slots', () => {
       `https://example.org/a${NEL}b c[d]<e>|f`,
     );
   });
+
+  it('keeps a link that opens a list item from starting a heading, fence, or rule', async () => {
+    routePage(
+      experimentPage([
+        experimentMetadata({
+          urls: [{ value: '#', description: 'Home' }, { value: '~~~' }, { value: '***' }],
+        }),
+      ]),
+    );
+
+    const result = await run({ query: 'ATLAS' });
+
+    const body = lines(result);
+    expect(body.filter((line) => line.startsWith('#'))).toEqual([
+      '## INSPIRE experiments (1)',
+      '### 1. CERN-LHC-ATLAS — ATLAS',
+    ]);
+    expect(body).toContain('- \\# — Home');
+    expect(body).toContain('- \\~~~');
+    expect(body).toContain('- \\***');
+  });
 });
 
 describeFailureClasses({

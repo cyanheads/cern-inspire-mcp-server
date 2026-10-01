@@ -71,6 +71,8 @@ describe('paperInput', () => {
     'https://inspirehep.net/authors/983328',
     'doi:',
     'ins',
+    '10.1016/*',
+    'doi:10.1016/j.physletb.2012.08.02?',
   ])('rejects %j with the pattern message', (input) => {
     const result = field(paperInput, input);
 
@@ -88,15 +90,33 @@ describe('paperInput', () => {
     expect(field(paperInput).success).toBe(false);
   });
 
-  it('describes every accepted form in its JSON Schema', () => {
+  it('accepts a 256-character DOI and rejects a longer one', () => {
+    const doi = (length: number) => `10.1234/${'x'.repeat(length - 8)}`;
+
+    expect(parsed(paperInput, doi(256))).toBe(doi(256));
+    const result = field(paperInput, doi(257));
+    expect(result.success).toBe(false);
+    expect(!result.success && result.error.issues.map((issue) => issue.code)).toContain('too_big');
+  });
+
+  it('rejects a 300-character value, measured after normalization', () => {
+    expect(field(paperInput, `doi:10.1234/${'x'.repeat(288)}`).success).toBe(false);
+    expect(parsed(paperInput, `  doi:10.1234/${'x'.repeat(248)}  `)).toHaveLength(256);
+  });
+
+  it('describes every accepted form and the length limit in its JSON Schema', () => {
     const schema = z.toJSONSchema(z.object({ paper: paperInput }), { io: 'input' });
 
     expect(schema.required).toEqual(['paper']);
-    const properties = (schema.properties ?? {}) as Record<string, { description?: string }>;
+    const properties = (schema.properties ?? {}) as Record<
+      string,
+      { description?: string; maxLength?: number }
+    >;
     const description = properties.paper?.description ?? '';
-    for (const form of ['recid', 'arXiv', 'DOI', 'doi.org', 'inspirehep.net']) {
+    for (const form of ['recid', 'arXiv', 'DOI', 'doi.org', 'inspirehep.net', '256 characters']) {
       expect(description).toContain(form);
     }
+    expect(properties.paper?.maxLength).toBe(256);
   });
 });
 

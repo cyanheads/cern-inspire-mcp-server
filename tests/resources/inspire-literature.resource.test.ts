@@ -2,8 +2,9 @@
  * @fileoverview Tests for the `inspire://literature/{recid}` resource: param
  * validation, the dossier it returns (same data as `cern_inspire_get_paper` with
  * the default author cap), the declared `paper_not_found` contract with the
- * recid in its data, HEPData availability degradation, and the upstream failure
- * classes the resource declares. The handler runs on an `InspireService` over a
+ * recid in its data, a failed HEPData availability lookup failing the read with
+ * its own error, and the upstream failure classes the resource declares. The
+ * handler runs on an `InspireService` over a
  * fake fetch; no live network.
  * @module tests/resources/inspire-literature.resource.test
  */
@@ -194,14 +195,37 @@ describe('handler', () => {
     expect((await read(HIGGS.recid)).hepdata).toEqual({ status: 'none' });
   });
 
-  it('degrades a failed availability lookup to lookup_failed instead of failing the read', async () => {
+  it("fails the read with the availability lookup's own error instead of serving a degraded body", async () => {
     routeRecord(dossierMetadata(1));
     h.route('/data', new Response('down', { status: 503 }));
 
-    const outcome = await settleWithFakeTimers(() => read(HIGGS.recid));
+    const error = await readFailure(HIGGS.recid);
 
-    expect(outcome.ok && outcome.value.hepdata).toEqual({ status: 'lookup_failed' });
-    expect(outcome.ok && outcome.value.recid).toBe(HIGGS.recid);
+    expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(error.data).toMatchObject({ status: 503 });
+  });
+
+  it.each([
+    [
+      'a 429',
+      () => rateLimitResponse('7'),
+      JsonRpcErrorCode.RateLimited,
+      { reason: 'inspire_rate_limited', retryAfter: 7 },
+    ],
+    [
+      'an HTML page',
+      () => htmlResponse(),
+      JsonRpcErrorCode.ServiceUnavailable,
+      { reason: 'upstream_unreadable' },
+    ],
+  ])('fails the read when the availability lookup gets %s', async (_label, reply, code, data) => {
+    routeRecord(dossierMetadata(1));
+    h.route('/data', reply);
+
+    const error = await readFailure(HIGGS.recid);
+
+    expect(error.code).toBe(code);
+    expect(error.data).toMatchObject(data);
   });
 
   it('keeps upstream strings verbatim: it returns JSON data and renders nothing', async () => {
@@ -234,6 +258,18 @@ describe('paper_not_found', () => {
     routeData(emptyBody());
 
     await expect(read('5')).rejects.toMatchObject({ data: { reason: 'paper_not_found' } });
+  });
+
+  it('reports not found, not the lookup failure, when the record is missing and the availability lookup failed', async () => {
+    h.route('/literature', jsonResponse(emptyBody()));
+    h.route('/data', new Response('down', { status: 503 }));
+
+    const error = await readFailure('99999999');
+
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: { reason: 'paper_not_found' },
+    });
   });
 });
 

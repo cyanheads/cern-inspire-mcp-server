@@ -9,9 +9,9 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { authorQueryInput, blankAsUnset } from '@/mcp-server/tools/inputs.js';
-import { inline, printUrl } from '@/mcp-server/tools/render.js';
 import type { AuthorMatch } from '@/services/inspire/identifiers.js';
 import { getInspireService } from '@/services/inspire/inspire-service.js';
+import { atLineStart, inline, printUrl } from '@/utils/render.js';
 
 const MAX_LIMIT = 25;
 
@@ -166,7 +166,7 @@ function renderPosition(p: PositionOutput): string {
     span,
     p.institutionRecid && `institution recid ${p.institutionRecid}`,
   ].filter(Boolean);
-  return `- ${inline(p.institution)}${details.length > 0 ? ` (${details.join(' · ')})` : ''}`;
+  return `- ${atLineStart(inline(p.institution))}${details.length > 0 ? ` (${details.join(' · ')})` : ''}`;
 }
 
 function renderAuthor(a: AuthorProfileOutput, position: number): string[] {
@@ -208,7 +208,7 @@ function renderAuthor(a: AuthorProfileOutput, position: number): string[] {
           adv.degreeType && `degree ${inline(adv.degreeType)}`,
           adv.recid && `author recid ${adv.recid}`,
         ].filter(Boolean);
-        return `- ${inline(adv.name)}${details.length > 0 ? ` (${details.join(' · ')})` : ''}`;
+        return `- ${atLineStart(inline(adv.name))}${details.length > 0 ? ` (${details.join(' · ')})` : ''}`;
       }),
     );
   }
@@ -221,7 +221,8 @@ function renderAuthor(a: AuthorProfileOutput, position: number): string[] {
     lines.push(
       '**URLs:**',
       ...a.urls.map(
-        (u) => `- ${printUrl(u.url)}${u.description ? ` — ${inline(u.description)}` : ''}`,
+        (u) =>
+          `- ${atLineStart(printUrl(u.url))}${u.description ? ` — ${inline(u.description)}` : ''}`,
       ),
     );
   }

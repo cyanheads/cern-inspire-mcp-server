@@ -16,9 +16,9 @@ import {
   yearFromInput,
   yearToInput,
 } from '@/mcp-server/tools/inputs.js';
-import { inline, quote } from '@/mcp-server/tools/render.js';
 import { getInspireService } from '@/services/inspire/inspire-service.js';
 import type { FacetFilters } from '@/services/inspire/types.js';
+import { inline, quote } from '@/utils/render.js';
 
 /** INSPIRE serves at most this many results of one query (`page × size`). */
 const RESULT_WINDOW = 10_000;
