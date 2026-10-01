@@ -1,6 +1,6 @@
 {
   "name": "@cyanheads/cern-inspire-mcp-server",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "mcpName": "io.github.cyanheads/cern-inspire-mcp-server",
   "description": "Search INSPIRE-HEP papers, authors, experiments, HEPData records; get citation metrics and BibTeX via MCP. STDIO or Streamable HTTP.",
   "author": "Casey Hand <casey@caseyjhand.com> (https://caseyjhand.com)",

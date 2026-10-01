@@ -1,6 +1,6 @@
 {
   "name": "cern-inspire-mcp-server",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Search INSPIRE-HEP papers, authors, experiments, HEPData records; get citation metrics and BibTeX.",
   "author": {
     "name": "cyanheads",
