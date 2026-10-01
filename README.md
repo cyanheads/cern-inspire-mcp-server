@@ -143,7 +143,7 @@ Agent-friendly output:
 - **No HEPData table values.** hepdata.net's bot challenge refuses the server's User-Agent, so tools that read hepdata.net directly are deferred. `cern_inspire_get_paper` and `cern_inspire_search_hepdata` return the record DOI and the hepdata.net page where the values are read.
 - **Malformed INSPIRE syntax doesn't fail.** An unparsed operator widens or empties the match instead; zero hits or a very large `totalCount` usually means a syntax slip (`cern_inspire_list_reference` topic `search_syntax`).
 - **10,000-result window.** Only the first 10,000 results of a query are reachable; narrow the query to reach the rest.
-- **One request queue per process, one rate limit per address.** Every caller of a server process shares one queue under INSPIRE's 15 requests per 5 s, so on a shared deployment one client's burst can delay or shed everyone else's calls with a retryable rate-limit error. A hosted deployment needs a per-client rate limit in front of `/mcp`, and should run one replica per egress IP, since INSPIRE counts requests per address; a per-caller share inside the server waits on the framework ([cyanheads/mcp-ts-core#618](https://github.com/cyanheads/mcp-ts-core/issues/618)).
+- **One request queue per process, one rate limit per address.** Every caller of a server process shares one queue under INSPIRE's 15 requests per 5 s, so on a shared deployment one client's burst can delay or shed everyone else's calls with a retryable rate-limit error.
 
 ## Getting started
 
