@@ -1,8 +1,10 @@
 /**
  * @fileoverview Paper and author identifier handling for INSPIRE: the one-to-one
- * normalizations the tool schemas run in their preprocess, the patterns they
- * validate against, and the classification that routes an identifier to the
- * INSPIRE query form that matches it.
+ * normalizations the tool schemas run in their preprocess, the paper pattern
+ * their refinement checks (kept out of the advertised JSON Schema), the HEPData
+ * record numbers a paper input can name instead of a paper, and the
+ * classification that routes an identifier to the INSPIRE query form that
+ * matches it.
  * @module services/inspire/identifiers
  */
 
@@ -19,15 +21,36 @@ const DOI = /^10\.\d{4,9}\/[^\s*?]+$/;
 export const PAPER_ID_PATTERN =
   /^(?:\d{1,9}|\d{4}\.\d{4,5}|[a-z-]+(?:\.[A-Z]{2})?\/\d{7}|10\.\d{4,9}\/[^\s*?]+)$/;
 
+/** A numbered hepdata.net record page, scheme optional; the `ins<recid>` form is a paper and is mapped instead. */
+const HEPDATA_RECORD_URL = /^(?:https?:\/\/)?(?:www\.)?hepdata\.net\/record\/(\d+)\/?(?:[?#].*)?$/i;
+/** A HEPData record DOI, or one of its version (`.vK`) or table (`.vK/tJ`) DOIs. */
+const HEPDATA_DOI = /^10\.17182\/hepdata\.(\d+)(?:\.v\d+(?:\/t\d+)?)?$/i;
+/** Prose punctuation after a DOI (`.`, `,`, `;`, `:`, `)`, `]`), which INSPIRE's `doi:` match passes over. */
+const TRAILING_PROSE_PUNCTUATION = /[.,;:)\]]+$/;
+
+/**
+ * The HEPData record number a numbered hepdata.net record URL or a HEPData DOI
+ * names, without leading zeros; `undefined` for anything else. A DOI is read past
+ * trailing prose punctuation, as the paper resolve reads it. Such an identifier
+ * names the data, not a paper, so the paper input routes it to the HEPData search
+ * rather than reading the number as a recid.
+ */
+export function hepdataRecordNumber(id: string): string | undefined {
+  const number = (HEPDATA_RECORD_URL.exec(id) ??
+    HEPDATA_DOI.exec(id.replace(TRAILING_PROSE_PUNCTUATION, '')))?.[1];
+  return number?.replace(/^0+(?=\d)/, '');
+}
+
 /**
  * Reduces the accepted spellings of a paper identifier to its bare form: trims,
- * maps arxiv.org, doi.org, inspirehep.net literature, and hepdata.net record URLs
- * to the identifier they carry, strips `arXiv:` / `doi:` prefixes (and any space after them) and HEPData's
+ * maps arxiv.org, doi.org, inspirehep.net literature, and hepdata.net
+ * `record/ins<recid>` URLs to the identifier they carry (a numbered
+ * `record/<n>` URL names a HEPData record, not a paper, and is not mapped), strips `arXiv:` / `doi:` prefixes (and any space after them) and HEPData's
  * `ins` prefix, lower-cases an old-style arXiv archive (`HEP-TH/9711200` →
  * `hep-th/9711200`, the subject class of `math.AG/0601001` kept as written), and
  * drops an arXiv version suffix (INSPIRE matches `1207.7214`, not `1207.7214v2`).
  * Every mapping is one-to-one; anything else passes through for the pattern
- * check to reject.
+ * refinement to reject.
  */
 export function normalizePaperId(raw: string): string {
   let id = raw.trim();
@@ -71,7 +94,7 @@ export function paperIdKey(kind: Exclude<PaperIdKind, 'recid'>, id: string): str
   const lower = id.toLowerCase();
   return kind === 'arxiv'
     ? lower.replace(/^([a-z-]+)\.[a-z]{2}(?=\/)/, '$1')
-    : lower.replace(/[.,;:)\]]+$/, '');
+    : lower.replace(TRAILING_PROSE_PUNCTUATION, '');
 }
 
 /** How an author query was routed: one of the identifier forms, or a free-text name. */

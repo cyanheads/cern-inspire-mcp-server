@@ -1,7 +1,8 @@
 /**
  * @fileoverview Tests for the paper and author identifier helpers: every URL and
  * prefix form `normalizePaperId` reduces, what `classifyPaperId` accepts and
- * refuses, the author normalizations, and the author query routing.
+ * refuses, the HEPData record numbers `hepdataRecordNumber` reads, the author
+ * normalizations, and the author query routing.
  * @module tests/shared/identifiers.test
  */
 
@@ -10,6 +11,7 @@ import { describe, expect, it } from 'vitest';
 import {
   classifyPaperId,
   containsOrcid,
+  hepdataRecordNumber,
   normalizeAuthorId,
   normalizePaperId,
   PAPER_ID_PATTERN,
@@ -210,6 +212,52 @@ describe('paperIdKey', () => {
 
   it('keys two different DOIs apart', () => {
     expect(paperIdKey('doi', DOI)).not.toBe(paperIdKey('doi', '10.1016/j.physletb.2013.02.037'));
+  });
+});
+
+describe('hepdataRecordNumber', () => {
+  it.each([
+    ['https://www.hepdata.net/record/98625', '98625'],
+    ['http://hepdata.net/record/98625/', '98625'],
+    ['https://www.hepdata.net/record/98625?version=1', '98625'],
+    ['https://www.hepdata.net/record/98625#table1', '98625'],
+    ['www.hepdata.net/record/98625', '98625'],
+    ['hepdata.net/record/98625', '98625'],
+    ['HTTPS://WWW.HEPDATA.NET/RECORD/98625', '98625'],
+    ['10.17182/hepdata.98625', '98625'],
+    ['10.17182/HEPDATA.98625', '98625'],
+    ['10.17182/hepdata.182472.v1', '182472'],
+    ['10.17182/hepdata.98625.v1/t1', '98625'],
+    // trailing prose punctuation, which the paper resolve also passes over
+    ['10.17182/hepdata.98625.', '98625'],
+    ['10.17182/hepdata.98625)', '98625'],
+    ['10.17182/hepdata.98625.v1;', '98625'],
+    ['10.17182/hepdata.98625.v1/t1).', '98625'],
+    ['10.17182/hepdata.98625],', '98625'],
+    // leading zeros name the same record
+    ['https://www.hepdata.net/record/0098625', '98625'],
+    ['10.17182/hepdata.0098625', '98625'],
+  ])('reads %j as HEPData record %j', (id, number) => {
+    expect(hepdataRecordNumber(id)).toBe(number);
+  });
+
+  it.each([
+    'https://www.hepdata.net/record/ins1124337',
+    'ins1124337',
+    '98625',
+    'https://www.hepdata.net/search/?q=98625',
+    'https://example.org/hepdata.net/record/98625',
+    'https://www.hepdata.net/record/98625/extra',
+    '10.17182/hepdata.',
+    '10.17182/hepdata.98625.x',
+    '10.17182/hepdata.98625/',
+    '10.17182/hepdata.98625.v1.t1',
+    '10.17182/hepdata98625.',
+    '10.17182/zenodo.98625',
+    '10.1016/hepdata.98625',
+    DOI,
+  ])('reads %j as no HEPData record', (id) => {
+    expect(hepdataRecordNumber(id)).toBeUndefined();
   });
 });
 

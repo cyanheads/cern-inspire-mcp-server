@@ -1,13 +1,15 @@
 /**
  * @fileoverview Input schemas and helpers shared across the INSPIRE tools: the
- * blank-as-unset wrapper for form clients, the `paper` identifier input, the
- * facet enum arrays (comma-joined or array, case-folded), the year bounds, the
- * author-identifier inputs, and the applied-filters echo string.
+ * blank-as-unset wrapper for form clients, the `paper` identifier input and the
+ * route from a HEPData record to its paper, the facet enum arrays (comma-joined
+ * or array, case-folded), the year bounds, the author-identifier inputs, and the
+ * applied-filters echo string.
  * @module mcp-server/tools/inputs
  */
 
 import { z } from '@cyanheads/mcp-ts-core';
 import {
+  hepdataRecordNumber,
   normalizeAuthorId,
   normalizePaperId,
   PAPER_ID_PATTERN,
@@ -23,8 +25,25 @@ export const blankAsUnset = <T extends z.ZodType>(schema: T) =>
   z.preprocess((value) => (value === '' ? undefined : value), schema);
 
 /**
+ * The call that leads from HEPData record `n` to its paper: the HEPData search
+ * matches the record DOI and returns the record's paper recids.
+ */
+export const hepdataRecordRoute = (n: string) =>
+  `call cern_inspire_search_hepdata with query dois.value:"10.17182/hepdata.${n}" and pass one of the record's paperRecids to cern_inspire_get_paper`;
+
+/** The pattern refinement's message: the HEPData route for a numbered record link, else the accepted forms. */
+const paperIdError = (value: unknown) => {
+  const record = typeof value === 'string' ? hepdataRecordNumber(value) : undefined;
+  return record
+    ? `A hepdata.net/record/${record} link names HEPData record ${record}, not a paper: ${hepdataRecordRoute(record)}.`
+    : 'Expected an INSPIRE recid (451647), an arXiv ID (1207.7214 or hep-th/9711200), or a DOI (10.1016/…).';
+};
+
+/**
  * One paper identifier, normalized before the length and pattern checks (see
  * `normalizePaperId`): recid, new or old arXiv ID, or DOI, at most 256 characters.
+ * The pattern runs as a refinement, so the advertised JSON Schema carries no
+ * `pattern` that would reject the prefixed and URL spellings the preprocess maps.
  */
 export const paperInput = z
   .preprocess(
@@ -32,13 +51,10 @@ export const paperInput = z
     z
       .string()
       .max(256)
-      .regex(
-        PAPER_ID_PATTERN,
-        'Expected an INSPIRE recid (451647), an arXiv ID (1207.7214 or hep-th/9711200), or a DOI (10.1016/…).',
-      ),
+      .refine((id) => PAPER_ID_PATTERN.test(id), { error: (issue) => paperIdError(issue.input) }),
   )
   .describe(
-    "INSPIRE recid (e.g. 451647), arXiv ID (1207.7214 or hep-th/9711200, with or without 'arXiv:', a version suffix, or an arxiv.org URL), DOI (10.1016/…, with or without 'doi:' or a doi.org prefix; no * or ? wildcards), an inspirehep.net literature URL, or HEPData's ins<recid> form or hepdata.net record URL. Up to 256 characters.",
+    "INSPIRE recid (e.g. 451647), arXiv ID (1207.7214 or hep-th/9711200, with or without 'arXiv:', a version suffix, or an https://arxiv.org/abs/ or https://arxiv.org/pdf/ prefix), DOI (10.1016/…, with or without 'doi:' or an https://doi.org/ prefix; no * or ? wildcards), an https://inspirehep.net/literature/<recid> URL, or HEPData's ins<recid> form, alone or in an https://www.hepdata.net/record/ins<recid> URL. Up to 256 characters.",
   );
 
 /**
@@ -68,22 +84,22 @@ function enumArray<const T extends readonly [string, ...string[]]>(
   }, z.array(z.enum(values).describe(itemDescription)).max(max).optional());
 }
 
-/** Up to 4 INSPIRE document types; multiple values AND together upstream. */
+/**
+ * Up to 4 INSPIRE document types; multiple values AND together upstream. The
+ * description documents the advertised enum array only; the comma-joined string
+ * and case folding stay undocumented leniency.
+ */
 export const documentTypesInput = enumArray(
   DOCUMENT_TYPES,
   4,
-  'An INSPIRE document type (case-insensitive).',
+  'An INSPIRE document type.',
 ).describe(
-  `Restrict to INSPIRE document types, as an array or a comma-separated string (up to 4). Multiple values must ALL hold (published + review = published reviews), not either. Values: ${DOCUMENT_TYPES.join(', ')}.`,
+  `Restrict to INSPIRE document types (up to 4). Multiple values must ALL hold (published + review = published reviews), not either. Values: ${DOCUMENT_TYPES.join(', ')}.`,
 );
 
-/** Up to 4 INSPIRE subject categories; multiple values AND together upstream. */
-export const subjectsInput = enumArray(
-  SUBJECTS,
-  4,
-  'An INSPIRE subject category (case-insensitive).',
-).describe(
-  `Restrict to INSPIRE subject categories, as an array or a comma-separated string (up to 4). Multiple values must ALL hold, not either. Values: ${SUBJECTS.join(', ')}.`,
+/** Up to 4 INSPIRE subject categories; multiple values AND together upstream. Documented as `documentTypesInput` is. */
+export const subjectsInput = enumArray(SUBJECTS, 4, 'An INSPIRE subject category.').describe(
+  `Restrict to INSPIRE subject categories (up to 4). Multiple values must ALL hold, not either. Values: ${SUBJECTS.join(', ')}.`,
 );
 
 const year = () => blankAsUnset(z.number().int().min(1900).max(2100).optional());

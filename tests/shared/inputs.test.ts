@@ -104,6 +104,26 @@ describe('paperInput', () => {
     expect(parsed(paperInput, `  doi:10.1234/${'x'.repeat(248)}  `)).toHaveLength(256);
   });
 
+  it.each([
+    'https://www.hepdata.net/record/98625',
+    'http://hepdata.net/record/98625/',
+    'www.hepdata.net/record/98625?version=1',
+    'hepdata.net/record/98625',
+  ])('rejects the numbered HEPData record link %j, which names a record, not a paper', (input) => {
+    expect(field(paperInput, input).success).toBe(false);
+  });
+
+  it.each([
+    ['10.17182/hepdata.98625', '10.17182/hepdata.98625'],
+    ['doi:10.17182/hepdata.182472.v1', '10.17182/hepdata.182472.v1'],
+    ['https://doi.org/10.17182/hepdata.98625.v1/t1', '10.17182/hepdata.98625.v1/t1'],
+  ])(
+    'passes the HEPData DOI %j through as a DOI, since a literature record can carry one',
+    (input, expected) => {
+      expect(parsed(paperInput, input)).toBe(expected);
+    },
+  );
+
   it('describes every accepted form and the length limit in its JSON Schema', () => {
     const schema = z.toJSONSchema(z.object({ paper: paperInput }), { io: 'input' });
 
@@ -118,6 +138,121 @@ describe('paperInput', () => {
     }
     expect(properties.paper?.maxLength).toBe(256);
   });
+
+  /** Every spelling the `paper` description documents, one or more per form. */
+  const DOCUMENTED_SPELLINGS = [
+    '451647',
+    '1207.7214',
+    'arXiv:1207.7214',
+    '1207.7214v2',
+    'arXiv:1207.7214v2',
+    'hep-th/9711200',
+    'arXiv:hep-th/9711200',
+    'hep-th/9711200v3',
+    'https://arxiv.org/abs/1207.7214',
+    'https://arxiv.org/abs/hep-th/9711200v1',
+    'https://arxiv.org/pdf/1207.7214v2.pdf',
+    '10.1016/j.physletb.2012.08.020',
+    'doi:10.1016/j.physletb.2012.08.020',
+    'https://doi.org/10.1016/j.physletb.2012.08.020',
+    'http://dx.doi.org/10.1016/j.physletb.2012.08.020',
+    'https://inspirehep.net/literature/1124337',
+    'https://inspirehep.net/api/literature/1124337',
+    'https://www.hepdata.net/record/ins1124337',
+    'ins1124337',
+  ];
+
+  /**
+   * Whether a string satisfies a string schema's keywords, the check a client runs
+   * on its arguments; a keyword this does not model fails the test instead of passing.
+   */
+  const satisfies = (schema: Record<string, unknown>, value: string) => {
+    for (const key of Object.keys(schema)) {
+      if (!['type', 'description', 'maxLength', 'minLength', 'pattern'].includes(key)) {
+        throw new Error(`unmodelled JSON Schema keyword: ${key}`);
+      }
+    }
+    return (
+      schema.type === 'string' &&
+      (typeof schema.maxLength !== 'number' || value.length <= schema.maxLength) &&
+      (typeof schema.minLength !== 'number' || value.length >= schema.minLength) &&
+      (typeof schema.pattern !== 'string' || new RegExp(schema.pattern, 'u').test(value))
+    );
+  };
+
+  const advertisedPaper = () =>
+    z.toJSONSchema(z.object({ paper: paperInput }), { io: 'input' }).properties?.paper as Record<
+      string,
+      unknown
+    >;
+
+  it('advertises a length-capped string with no pattern', () => {
+    expect(advertisedPaper()).toEqual({
+      type: 'string',
+      maxLength: 256,
+      description: paperInput.description,
+    });
+  });
+
+  it.each(DOCUMENTED_SPELLINGS)(
+    'admits the documented spelling %j in the advertised schema, and the server accepts it',
+    (spelling) => {
+      expect(satisfies(advertisedPaper(), spelling)).toBe(true);
+      expect(field(paperInput, spelling).success).toBe(true);
+    },
+  );
+
+  it('names the scheme on every URL or prefix it documents, never a bare host', () => {
+    const description = paperInput.description ?? '';
+    const hosts = description.match(/\S*(?:arxiv\.org|doi\.org|inspirehep\.net|hepdata\.net)\S*/g);
+
+    expect(hosts?.length).toBeGreaterThanOrEqual(4);
+    for (const host of hosts ?? []) {
+      expect(host).toMatch(/^https:\/\//);
+    }
+  });
+
+  it('parses every URL and prefix it documents, completed with an example identifier', () => {
+    const documented = (paperInput.description ?? '').match(/https:\/\/[^\s,)]+/g) ?? [];
+    /** The identifier a documented form leads to, and the example that completes the form. */
+    const complete = (form: string): [string, string] => {
+      if (form.includes('<recid>')) return [form.replace('<recid>', '1124337'), '1124337'];
+      if (form.includes('arxiv.org')) return [`${form}1207.7214`, '1207.7214'];
+      return [`${form}10.1016/j.physletb.2012.08.020`, '10.1016/j.physletb.2012.08.020'];
+    };
+
+    expect(documented).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining('arxiv.org/abs/'),
+        expect.stringContaining('arxiv.org/pdf/'),
+        expect.stringContaining('doi.org/'),
+        expect.stringContaining('inspirehep.net/literature/'),
+        expect.stringContaining('hepdata.net/record/ins'),
+      ]),
+    );
+    for (const form of documented) {
+      const [spelling, id] = complete(form);
+      expect(parsed(paperInput, spelling)).toBe(id);
+    }
+  });
+
+  it.each([
+    'https://www.hepdata.net/record/98625',
+    'http://hepdata.net/record/98625/',
+    'www.hepdata.net/record/98625?version=1',
+    'hepdata.net/record/98625',
+    'https://www.hepdata.net/record/0098625',
+  ])(
+    'routes the HEPData record link %j to its paper through cern_inspire_search_hepdata',
+    (input) => {
+      const result = field(paperInput, input);
+
+      expect(result.success).toBe(false);
+      expect(!result.success && result.error.issues.map((issue) => issue.message)).toEqual([
+        'A hepdata.net/record/98625 link names HEPData record 98625, not a paper: call cern_inspire_search_hepdata with query dois.value:"10.17182/hepdata.98625" and pass one of the record\'s paperRecids to cern_inspire_get_paper.',
+      ]);
+    },
+  );
 });
 
 describe('blankAsUnset', () => {
@@ -275,6 +410,19 @@ describe.each([
     expect(property.maxItems).toBe(4);
     expect(property.items?.enum).toEqual([...vocabulary]);
     expect(property.description).toMatch(/ALL hold/);
+  });
+
+  it('documents only what the advertised enum array admits: no comma-joined string, no case folding', () => {
+    const json = z.toJSONSchema(z.object({ v: schema }), { io: 'input' });
+    const property = json.properties?.v as {
+      description?: string;
+      items?: { description?: string };
+    };
+
+    for (const text of [property.description ?? '', property.items?.description ?? '']) {
+      expect(text).not.toBe('');
+      expect(text).not.toMatch(/comma|case-insensitive|any case/i);
+    }
   });
 });
 
