@@ -7,7 +7,7 @@
     "url": "https://github.com/cyanheads/cern-inspire-mcp-server",
     "source": "github"
   },
-  "version": "0.1.1",
+  "version": "0.1.2",
   "remotes": [
     {
       "type": "streamable-http",
@@ -20,7 +20,7 @@
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/cern-inspire-mcp-server",
       "runtimeHint": "node",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "packageArguments": [
         {
           "type": "positional",
@@ -49,7 +49,7 @@
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/cern-inspire-mcp-server",
       "runtimeHint": "node",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "packageArguments": [
         {
           "type": "positional",
