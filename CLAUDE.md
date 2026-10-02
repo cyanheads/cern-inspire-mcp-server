@@ -20,23 +20,25 @@ Eight read-only tools and one resource over INSPIRE-HEP's keyless REST API (`htt
 | Upstream path | Used by |
 |:--------------|:--------|
 | `/literature` (search, `fields`-selected) | `cern_inspire_search_literature`, `cern_inspire_get_paper` (arXiv and DOI resolution included), `inspire://literature/{recid}` |
-| `/literature` with `format=` (`bibtex`, `latex-eu`, `latex-us`) | `cern_inspire_export_citations` |
-| `/literature/facets` (`facet_name=citation-summary`) | `cern_inspire_get_citation_summary` |
+| `/literature/<recid>` (redirects not followed, after a `recid:N` search returns no hit: where INSPIRE sends a merged recid) | `cern_inspire_get_paper`, `inspire://literature/{recid}` |
+| `/literature` with `format=` (`bibtex`, `latex-eu`, `latex-us`), plus a `fields=control_number` search for the match total on a later page | `cern_inspire_export_citations` |
+| `/literature/facets` (`facet_name=citation-summary`, plus `citations-by-year` in parallel unless a year bound or the self-citation exclusion is set) | `cern_inspire_get_citation_summary` |
 | `/authors` | `cern_inspire_search_authors`, author resolution in `cern_inspire_get_citation_summary` |
 | `/experiments` | `cern_inspire_search_experiments` |
 | `/data` | `cern_inspire_search_hepdata`, the `hepdata` block of `cern_inspire_get_paper` |
 
 `cern_inspire_list_reference` serves static tables and makes no upstream call. There are no prompts.
 
-`InspireService` (`src/services/inspire/inspire-service.ts`) owns every request: one process-wide pacer under INSPIRE's published 15 requests per 5 s per address (`limits: [{ requests: 12, perMs: 5_000 }]`, `maxConcurrent: 4`, a cooldown after a `429`), `withRetry` outside the pacer (2 retries), one 55 s budget per tool call opened by `beginCall(ctx)` and threaded through every request in the call, an 8 MiB byte ceiling through `fetchBounded` (`src/services/http/fetch-bounded.ts`), and a strict query-parameter allowlist, since INSPIRE silently ignores unknown parameters. There is no cache and no server-specific env var.
+`InspireService` (`src/services/inspire/inspire-service.ts`) owns every request: one process-wide pacer under INSPIRE's published 15 requests per 5 s per address (`limits: [{ requests: 12, perMs: 5_000 }]`, `maxConcurrent: 4`, a cooldown after a `429`), a series gate that lets at most two citations-by-year requests into that pacer at once (`maxConcurrent: 2`, since one holds a slot for up to 15 s), `withRetry` outside the pacer (2 retries), one 55 s budget per tool call opened by `beginCall(ctx)` and threaded through every request in the call, an 8 MiB byte ceiling through `fetchBounded` (`src/services/http/fetch-bounded.ts`), and a strict query-parameter allowlist, since INSPIRE silently ignores unknown parameters. There is no cache and no server-specific env var.
 
 Conventions every definition follows:
 
 - **Every INSPIRE request goes through `InspireService`**, with the call opened by `inspire.beginCall(ctx)`. Never `fetch` from a handler: pacing, the budget, retries, and error classification live in the service.
 - **Honest User-Agent only.** `cern-inspire-mcp-server/<version> (+https://github.com/cyanheads/cern-inspire-mcp-server)`. Never add a `curl`, `Wget`, or `python-requests` token, and send nothing to hepdata.net.
 - **Never request `email_addresses`.** INSPIRE's terms bar collecting them in bulk; the author `fields` list leaves them out.
-- **Shared inputs** live in `src/mcp-server/tools/inputs.ts`: `blankAsUnset` wraps every optional or defaulted input; `paperInput`, `documentTypesInput` / `subjectsInput` (array or comma-joined string, case-folded, up to 4, values AND together), `yearFromInput` / `yearToInput`, `authorQueryInput` / `authorIdInput`, and the `formatAppliedFilters` echo.
-- **Upstream text is data.** Every upstream or caller string in `format()` goes through `inline()`, `cell()`, `quote()`, `fenced()`, or `printUrl()` from `src/utils/render.ts`, and a list item that opens with one wraps it in `atLineStart()`; outside a `quote()` or `fenced()` block, no other line opens with upstream text. `structuredContent` keeps each string as received, apart from Unicode tag characters, which the service drops at decode.
+- **Shared inputs** live in `src/mcp-server/tools/inputs.ts`: `blankAsUnset` wraps every optional or defaulted input; `paperInput`, `documentTypesInput` / `subjectsInput` (array or comma-joined string, case-folded, up to 4, values AND together), `yearFromInput` / `yearToInput`, `authorQueryInput` / `authorIdInput`, and the `formatAppliedFilters` echo. The advertised `inputSchema` must admit every spelling a description documents, and the input must parse it: `paperInput` checks its pattern in a `.refine()`, never `.regex()`, its description names the scheme on every URL form, and the facet descriptions document only the enum array (design § Design Decisions #31).
+- **Placeholders the server writes** in a notice, an `errors[]` recovery hint, or `format()` text outside a code span are uppercase words (`"t WORDS"`, `"a NAME"`, `collaborations.value:NAME`), never `<…>`, which a client rendering markdown to HTML drops as a tag. A code span prints `<…>` as written (list_reference's `HEPData ins<recid>` term), and `.describe()` text and the server instructions reach `tools/list` and `initialize`, not rendered markdown.
+- **Upstream text is data.** Every upstream or caller string in `format()` goes through `inline()`, `cell()`, `quote()`, `fenced()`, or `printUrl()` from `src/utils/render.ts`, and a list item that opens with one wraps it in `atLineStart()`; outside a `quote()` or `fenced()` block, no other line opens with upstream text. A caller's own query, author, or paper identifier echoed in a notice or error message goes through `callerEcho()`, which leaves `*`, `_`, `~`, and `>` as written so the echo can be sent back, and entity-encodes only a `<` that could open a tag, comment, or autolink; an identifier value a caller copies (DOI, record DOI, report number, texkey, arXiv ID, BAI, ORCID, INSPIRE ID, other ID) goes through `identifier()`, the same rules. `structuredContent` keeps each string as received with two exceptions: the service drops Unicode tag characters at decode, and `normalize.ts` converts titles and abstracts from publisher HTML/JATS/MathML to text with `markupToText()` (LaTeX left as published).
 - **Required enrichment first.** A handler writes its required enrichment fields (`truncated` / `shown` / `cap`, `totalCount`, the echo strings) with neutral values before its first upstream call or branch, then overwrites them where the real value is known.
 - **Errors.** Every tool that reaches INSPIRE declares `inspire_rate_limited`, `pacer_shed`, and `upstream_unreadable` inline (`thrownBy: 'service'`), plus `invalid_query` when it sends a caller query; the resource declares the first three. Handler-side reasons (`paper_not_found`, `beyond_result_window`, `invalid_year_range`, `missing_target`, `author_not_identifier`, `author_not_found`) are thrown through `ctx.fail`, and tools mark caller-input reasons `severity: 'notice'`.
 - **No fabrication.** A field INSPIRE leaves out stays absent (`firstAuthor`, `ongoing`, `averageCitations`), and `format()` prints "Not available" or "not recorded" rather than a guess.
@@ -220,7 +222,7 @@ await createApp({
     initInspireService(core.config); // the User-Agent carries core.config.mcpServerVersion
   },
   teardown() {
-    disposeInspireService(); // releases the pacer's timer and rejects queued waiters
+    disposeInspireService(); // releases both pacers' timers and rejects queued waiters
   },
 });
 ```
@@ -315,11 +317,12 @@ src/
     inspire/
       inspire-service.ts                # InspireService: pacer, per-call budget, retries, param allowlist, field lists
       identifiers.ts                    # Paper and author identifier normalization and routing (matchedAs)
+      markup-to-text.ts                 # Publisher HTML/JATS/MathML and entities in titles and abstracts → text
       normalize.ts                      # Raw INSPIRE records → output shapes; absent fields stay absent
       types.ts                          # Raw upstream and normalized domain types
       vocabulary.ts                     # Document types, subjects, citation-bucket ranges
   utils/
-    render.ts                           # inline / cell / quote / fenced / printUrl / atLineStart for upstream text in format() and error messages
+    render.ts                           # inline / cell / quote / fenced / printUrl / atLineStart / callerEcho for upstream and caller text in format(), notices, and error messages
 tests/
   fixtures/                             # INSPIRE bodies, service harness, shared failure suite, result readers
   tools/  resources/  services/  shared/  # Suites mirroring src/
