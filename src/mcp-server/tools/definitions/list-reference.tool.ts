@@ -149,6 +149,18 @@ const REFERENCE: Record<Topic, Entry[]> = {
       example: 'accelerator_experiments.legacy_name:"CERN-LHC-ATLAS"',
     },
     {
+      term: 'aff NAME',
+      meaning:
+        'Papers with an author whose affiliation INSPIRE records under that institution name: its curated short name, such as CERN, not the affiliation text printed on the paper; case-insensitive. affid:N is more complete.',
+      example: 'aff CERN',
+    },
+    {
+      term: 'affid:N',
+      meaning:
+        "Papers linked to institution record N through an author's or supervisor's affiliation, a thesis institution, or a record-level affiliation. N is the institution recid cern_inspire_search_authors (institutionRecid) and cern_inspire_search_experiments (institutions[].recid) return; as the query of cern_inspire_get_citation_summary it gives the institution's citation summary.",
+      example: 'affid:902725',
+    },
+    {
       term: 'and / or / not',
       meaning: 'Combine terms; parentheses group them.',
       example: 'a Edward.Witten.1 and not t string',
@@ -190,7 +202,7 @@ const REFERENCE: Record<Topic, Entry[]> = {
     {
       term: 'DOI',
       meaning:
-        "Publisher DOI, matched case-insensitively. The paper input of cern_inspire_get_paper strips 'doi:' and doi.org prefixes; a literature query takes doi:DOI.",
+        "Publisher DOI, matched case-insensitively. The paper input of cern_inspire_get_paper strips 'doi:' and https://doi.org/ prefixes; a literature query takes doi:DOI.",
       example: '10.1016/j.physletb.2012.08.020',
     },
     {
@@ -222,6 +234,12 @@ const REFERENCE: Record<Topic, Entry[]> = {
       example: 'CERN-LHC-ATLAS',
     },
     {
+      term: 'institution recid',
+      meaning:
+        "An institution's recid, as institutionRecid (cern_inspire_search_authors) and institutions[].recid (cern_inspire_search_experiments) return it; select its papers with affid:N in cern_inspire_search_literature or cern_inspire_get_citation_summary.",
+      example: '902725',
+    },
+    {
       term: 'texkey',
       meaning:
         "INSPIRE's citation key, used by the BibTeX and LaTeX entries of cern_inspire_export_citations.",
@@ -230,7 +248,7 @@ const REFERENCE: Record<Topic, Entry[]> = {
     {
       term: 'HEPData ins<recid>',
       meaning:
-        'HEPData addresses a paper by its INSPIRE literature recid with an ins prefix; the paper input of cern_inspire_get_paper accepts it, and a literature query takes recid:N.',
+        "HEPData's form of an INSPIRE literature recid, with an ins prefix; the paper input of cern_inspire_get_paper accepts it, and a literature query takes recid:N.",
       example: 'ins3182500',
     },
     {
@@ -281,13 +299,18 @@ const REFERENCE: Record<Topic, Entry[]> = {
       meaning:
         'Drops citations from papers sharing an author with the cited paper. For papers with over 20 authors and no collaboration name, only the first 20 authors count.',
     },
+    {
+      term: 'citationsByYear',
+      meaning:
+        "Citations received per year, by the citing record's earliest date, self-citations included, over every matched record rather than the citeable subset, so the series can sum past all.citations. Left out when year_from, year_to, or exclude_self_citations is set, since INSPIRE cannot apply them to it, and for a query matching more than about 150,000 records, which INSPIRE cannot count in time, unless INSPIRE answers within about 2 s (a series it has cached).",
+    },
   ],
   hepdata: [
     {
       term: 'HEPData record',
       meaning:
-        'The numerical tables behind one paper, on hepdata.net at /record/ins followed by the INSPIRE literature recid.',
-      example: 'https://www.hepdata.net/record/ins3182500',
+        'The numerical tables behind one paper, on hepdata.net at /record/N, N being the number in the record DOI 10.17182/hepdata.N. The ins form, /record/ins followed by a literature recid, finds a record by the recid it was submitted under, which can be one INSPIRE has since merged into another paper. A few papers have more than one record.',
+      example: 'https://www.hepdata.net/record/182706',
     },
     {
       term: 'versions',
@@ -325,13 +348,13 @@ const cellText = (text: string) => text.replace(/\\/g, '\\\\').replace(/\|/g, '\
 export const listReferenceTool = tool('cern_inspire_list_reference', {
   title: 'INSPIRE reference vocabulary',
   description:
-    'Decode the vocabulary the other cern_inspire tools take: INSPIRE search syntax (field operators, boolean logic, sort orders, the 10,000-result window, and how malformed queries behave), identifier forms (recid, arXiv, DOI, BAI, ORCID, INSPIRE ID, texkey, HEPData DOIs), the document_types and subjects filter values, citation-summary buckets, and HEPData record versions and DOIs. Static content with no upstream call; use it to build a query or to recover from an empty or unexpectedly broad result.',
+    'Decode the vocabulary the other cern_inspire tools take: INSPIRE search syntax (field operators, boolean logic, sort orders, the 10,000-result window, and how malformed queries behave), identifier forms (recid, arXiv, DOI, BAI, ORCID, INSPIRE ID, institution recid, texkey, HEPData DOIs), the document_types and subjects filter values, citation-summary buckets, and HEPData record versions and DOIs. Static content with no upstream call; use it to build a query or to recover from an empty or unexpectedly broad result.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   input: z.object({
     topic: z
       .enum(TOPICS)
       .describe(
-        'Which vocabulary to decode: search_syntax (query operators and rules), identifiers (paper, author, experiment, and HEPData identifier forms), document_types, subjects, citation_buckets (citation-summary ranges and terms), or hepdata (record versions, DOIs, and licence).',
+        'Which vocabulary to decode: search_syntax (query operators and rules), identifiers (paper, author, experiment, institution, and HEPData identifier forms), document_types, subjects, citation_buckets (citation-summary ranges and terms), or hepdata (record versions, DOIs, and licence).',
       ),
   }),
   output: z.object({

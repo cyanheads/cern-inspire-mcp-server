@@ -190,6 +190,20 @@ describe('vocabulary topics', () => {
       expect(ranges).toContain(range);
     }
   });
+
+  it('decodes citationsByYear: every matched record, and the filters that leave it out', async () => {
+    const { output, text } = await run('citation_buckets');
+
+    const entry = output.entries.find((e) => e.term === 'citationsByYear');
+    expect(entry?.meaning).toContain('over every matched record rather than the citeable subset');
+    expect(entry?.meaning).toContain('year_from, year_to, or exclude_self_citations');
+    expect(entry?.meaning).toContain('more than about 150,000 records');
+    expect(entry?.meaning).toContain(
+      'unless INSPIRE answers within about 2 s (a series it has cached)',
+    );
+    expect(text).toContain('| `citationsByYear` |');
+    expect(text).toContain('can sum past all.citations');
+  });
 });
 
 describe('examples agree with the validators the tools use', () => {
@@ -212,11 +226,30 @@ describe('examples agree with the validators the tools use', () => {
     }
   });
 
+  it('names a DOI prefix the paper input strips in a form it accepts, with its scheme', async () => {
+    const { output } = await run('identifiers');
+
+    const meaning = output.entries.find((e) => e.term === 'DOI')?.meaning ?? '';
+    const prefixes = meaning.match(/\S*doi\.org\/?/g) ?? [];
+    expect(prefixes.length).toBeGreaterThan(0);
+    for (const prefix of prefixes) {
+      const doi = await example('identifiers', 'DOI');
+      expect(paperInput.parse(`${prefix.replace(/\/?$/, '/')}${doi}`)).toBe(doi);
+    }
+  });
+
   it('gives a HEPData ins<recid> example the paper input reduces to a recid', async () => {
     const ins = await example('identifiers', 'HEPData ins<recid>');
 
     expect(ins).toMatch(/^ins\d+$/);
     expect(classifyPaperId(normalizePaperId(ins))).toBe('recid');
+  });
+
+  it('gives a HEPData record page keyed on the record number of the record DOI example', async () => {
+    const page = await example('hepdata', 'HEPData record');
+    const doi = await example('identifiers', 'HEPData record DOI');
+
+    expect(page).toBe(`https://www.hepdata.net/record/${doi.replace('10.17182/hepdata.', '')}`);
   });
 
   it.each([
@@ -230,6 +263,61 @@ describe('examples agree with the validators the tools use', () => {
 
   it('keeps the arXiv example free of a version suffix', async () => {
     expect(await example('search_syntax', 'arxiv:ID')).not.toMatch(/v\d+$/);
+  });
+
+  it('gives an affid example built from the institution recid example', async () => {
+    const recid = await example('identifiers', 'institution recid');
+
+    expect(recid).toMatch(/^\d+$/);
+    expect(await example('search_syntax', 'affid:N')).toBe(`affid:${recid}`);
+  });
+});
+
+describe('affiliation queries', () => {
+  it('lists aff NAME and affid:N in search_syntax, on both surfaces', async () => {
+    const { output, text } = await run('search_syntax');
+
+    const aff = output.entries.find((e) => e.term === 'aff NAME');
+    const affid = output.entries.find((e) => e.term === 'affid:N');
+    expect(aff).toMatchObject({ example: 'aff CERN' });
+    expect(aff?.meaning).toContain('case-insensitive');
+    expect(affid).toMatchObject({ example: 'affid:902725' });
+    expect(text).toContain('| `aff NAME` |');
+    expect(text).toContain('| `affid:N` |');
+    expect(text).toContain('`affid:902725`');
+  });
+
+  it('says aff matches the institution name INSPIRE records, not the affiliation text on the paper', async () => {
+    const { output } = await run('search_syntax');
+
+    const meaning = output.entries.find((e) => e.term === 'aff NAME')?.meaning ?? '';
+    expect(meaning).toContain('curated short name');
+    expect(meaning).toContain('not the affiliation text printed on the paper');
+    expect(meaning).not.toContain('as the affiliation is written on the paper');
+  });
+
+  it('says affid:N matches record N through every affiliation path INSPIRE searches', async () => {
+    const { output } = await run('search_syntax');
+
+    const meaning = output.entries.find((e) => e.term === 'affid:N')?.meaning ?? '';
+    for (const path of [
+      "an author's or supervisor's affiliation",
+      'a thesis institution',
+      'a record-level affiliation',
+    ]) {
+      expect(meaning).toContain(path);
+    }
+    expect(meaning).not.toContain('other names');
+  });
+
+  it('lists the institution recid in identifiers, naming the query that takes it and the tools that return it', async () => {
+    const { output, text } = await run('identifiers');
+
+    const entry = output.entries.find((e) => e.term === 'institution recid');
+    expect(entry?.meaning).toContain('affid:N');
+    expect(entry?.meaning).toContain('institutionRecid');
+    expect(entry?.meaning).toContain('institutions[].recid');
+    expect(text).toContain('| `institution recid` |');
   });
 });
 
