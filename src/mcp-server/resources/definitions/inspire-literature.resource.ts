@@ -17,7 +17,7 @@ export const inspireLiteratureResource = resource('inspire://literature/{recid}'
   name: 'inspire_literature',
   title: 'INSPIRE literature record',
   description:
-    'One INSPIRE-HEP literature record by recid, as the cern_inspire_get_paper dossier in JSON: title, abstract, authors with affiliations (first 25; authorCount gives the total), publication, identifiers, citation counts, linked experiments, texkeys, and HEPData availability. Use cern_inspire_get_paper to raise the author cap or to look a paper up by arXiv ID or DOI.',
+    'One INSPIRE-HEP literature record by recid, as the cern_inspire_get_paper dossier in JSON: title, abstract, authors with affiliations (first 25; authorCount gives the total), publication, identifiers, citation counts, linked experiments, texkeys, and HEPData availability. A recid INSPIRE has merged into another record serves the surviving record, with mergedFrom naming the recid in the URI. Use cern_inspire_get_paper to raise the author cap or to look a paper up by arXiv ID or DOI.',
   mimeType: 'application/json',
   params: z.object({
     recid: z

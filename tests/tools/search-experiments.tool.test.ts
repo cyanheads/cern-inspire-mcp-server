@@ -213,6 +213,18 @@ describe('declared error contracts', () => {
   });
 });
 
+describe('next-step descriptions', () => {
+  it('names the affid:N query a host institution recid feeds', () => {
+    const description =
+      searchExperimentsTool.output.shape.experiments.element.shape.institutions.element.shape.recid
+        .description ?? '';
+
+    expect(description).toContain('affid:N');
+    expect(description).toContain('cern_inspire_search_literature');
+    expect(description).toContain('cern_inspire_get_citation_summary');
+  });
+});
+
 describe('required enrichment', () => {
   it('writes every required field on a zero-result page', async () => {
     routePage(emptyBody());
@@ -298,6 +310,18 @@ describe('zero-hit notice', () => {
     expect(text).toContain('cern_inspire_search_literature');
   });
 
+  it('spells the collaboration placeholder in capitals on both surfaces, never as an HTML-shaped tag', async () => {
+    routePage(emptyBody());
+
+    const result = await run({ query: 'Zzzz' });
+
+    const text = structured<Output>(result).notice ?? '';
+    expect(text).toContain('using "collaboration:NAME".');
+    expect(text).not.toMatch(/<[A-Za-z]|&[a-z]+;/);
+    expect(fullText(result)).toContain('using "collaboration:NAME".');
+    expect(fullText(result)).not.toMatch(/<[A-Za-z]/);
+  });
+
   it('names a recid lookup by its digits', async () => {
     routePage(emptyBody());
 
@@ -306,15 +330,35 @@ describe('zero-hit notice', () => {
     expect(out.notice?.startsWith('No INSPIRE experiment matched "999999999". ')).toBe(true);
   });
 
-  it('echoes the query through inline(): newlines flatten and brackets are escaped', async () => {
+  it('echoes the query through callerEcho(): newlines flatten and brackets are escaped', async () => {
     routePage(emptyBody());
 
     const result = await run({ query: 'ATLAS\r\n# injected\n[x](http://evil) <b>' });
 
     const text = structured<Output>(result).notice ?? '';
     expect(text).not.toMatch(/[\r\n]/);
-    expect(text).toContain('ATLAS # injected \\[x\\](http://evil) &lt;b&gt;');
+    expect(text).toContain('ATLAS # injected \\[x\\](http://evil) &lt;b>');
     expect(fullText(result)).not.toMatch(/^# injected/m);
+  });
+
+  it('echoes a wildcard query as written on both surfaces, so it can be sent again', async () => {
+    routePage(emptyBody());
+
+    const result = await run({ query: 'CERN-LHC-*' });
+
+    expect(structured<Output>(result).notice).toMatch(
+      /^No INSPIRE experiment matched "CERN-LHC-\*"\. /,
+    );
+    expect(fullText(result)).toContain('No INSPIRE experiment matched "CERN-LHC-*". ');
+  });
+
+  it('still escapes a link-shaped query in the content[] echo', async () => {
+    routePage(emptyBody());
+
+    const result = await run({ query: '[x](javascript:alert(1))' });
+
+    expect(fullText(result)).toContain('"\\[x\\](javascript:alert(1))"');
+    expect(fullText(result)).not.toContain('[x](');
   });
 });
 
@@ -586,7 +630,7 @@ describe('upstream text stays out of inline markdown slots', () => {
     expect(lines(hostile).some((line) => line.startsWith('# Injected'))).toBe(false);
     expect(lines(hostile).filter((line) => line.startsWith('#'))).toEqual([
       '## INSPIRE experiments (1)',
-      '### 1. CERN-LHC-ATLAS # Injected heading **Core:** forged — ATLAS # Injected heading **Core:** forged',
+      '### 1. CERN-LHC-ATLAS # Injected heading \\*\\*Core:\\*\\* forged — ATLAS # Injected heading \\*\\*Core:\\*\\* forged',
     ]);
   });
 

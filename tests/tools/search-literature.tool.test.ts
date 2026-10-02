@@ -19,6 +19,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { searchLiteratureTool } from '@/mcp-server/tools/definitions/search-literature.tool.js';
 import { describeFailureClasses } from '../fixtures/failure-suite.js';
+import { MARKUP_AS_TEXT, MARKUP_FREE, PUBLISHER_MARKUP } from '../fixtures/inspire-markup.js';
 import {
   emptyBody,
   htmlResponse,
@@ -285,6 +286,14 @@ describe('declared error contracts', () => {
     }
   });
 
+  it('routes an unreadable body to a later retry of the same page and size, never a smaller size that shifts the page', () => {
+    const unreadable = searchLiteratureTool.errors?.find((e) => e.reason === 'upstream_unreadable');
+
+    expect(unreadable?.recovery).toBe(
+      'Retry this call in a few seconds; if it fails again, INSPIRE is likely serving an error page, so wait a minute before retrying cern_inspire_search_literature with the same page and size.',
+    );
+  });
+
   it('fails year_from later than year_to as invalid_year_range, before any request', async () => {
     const result = await run({ query: 'x', year_from: 2020, year_to: 2010 });
 
@@ -497,7 +506,7 @@ describe('zero-hit notice', () => {
   };
 
   const BARE =
-    'Bare words search all fields; use "t <words>" for titles or "a <name>" for authors — see cern_inspire_list_reference topic search_syntax.';
+    'Bare words search all fields; use "t WORDS" for titles or "a NAME" for authors — see cern_inspire_list_reference topic search_syntax.';
   const BAI =
     'Author BAIs are exact and case-sensitive, and usually spell out the first name (Jane.Doe.1, not J.Doe.1); resolve the person with cern_inspire_search_authors.';
 
@@ -505,10 +514,58 @@ describe('zero-hit notice', () => {
     expect(await notice({ query: 't zzzz' })).toBe('No INSPIRE literature matched "t zzzz".');
   });
 
+  it('echoes a wildcard query as written on both surfaces, so it can be sent again', async () => {
+    routePage(emptyBody());
+
+    const result = await run({ query: 't higgs*' });
+
+    expect(structured<Output>(result).notice).toBe('No INSPIRE literature matched "t higgs*".');
+    expect(fullText(result)).toContain('No INSPIRE literature matched "t higgs*".');
+  });
+
+  it('still escapes a link- or HTML-shaped query in the echo', async () => {
+    routePage(emptyBody());
+
+    const result = await run({ query: 't [x](javascript:alert(1)) <b>' });
+
+    expect(structured<Output>(result).notice).toBe(
+      'No INSPIRE literature matched "t \\[x\\](javascript:alert(1)) &lt;b>".',
+    );
+    expect(fullText(result)).toContain('"t \\[x\\](javascript:alert(1)) &lt;b>"');
+    expect(fullText(result)).not.toContain('[x](');
+    expect(fullText(result)).not.toContain('<b>');
+  });
+
+  it.each([
+    ['a comparison', 't zzqqxx and date > 2015'],
+    ['an arrow', 'affine zzqqxxwv -> nothing'],
+    ['a reaction', 't P P --> ZZQQXX X'],
+    ['a less-than before a number', 't zzqqxx and date < 2015'],
+  ])('echoes %s as written on both surfaces, so it can be sent again', async (_label, query) => {
+    routePage(emptyBody());
+
+    const result = await run({ query });
+
+    const notice = structured<Output>(result).notice ?? '';
+    expect(notice).toContain(`No INSPIRE literature matched "${query}".`);
+    expect(notice).not.toMatch(/&[a-z]+;/);
+    expect(fullText(result)).toContain(`No INSPIRE literature matched "${query}".`);
+  });
+
   it('adds the bare-words hint for a query with no field operator', async () => {
     expect(await notice({ query: 'zzzz nothing' })).toBe(
       `No INSPIRE literature matched "zzzz nothing". ${BARE}`,
     );
+  });
+
+  it('spells the bare-words placeholders in capitals on both surfaces, never as HTML-shaped tags', async () => {
+    routePage(emptyBody());
+
+    const result = await run({ query: 'zzzz nothing' });
+
+    expect(structured<Output>(result).notice).not.toMatch(/<[A-Za-z]|&[a-z]+;/);
+    expect(fullText(result)).toContain('use "t WORDS" for titles or "a NAME" for authors');
+    expect(fullText(result)).not.toMatch(/<[A-Za-z]/);
   });
 
   it('adds the filter fragment, listing the facet filters but not the sort', async () => {
@@ -585,6 +642,22 @@ describe('zero-hit notice', () => {
     ['refersto:recid:451647', false],
     ['collaboration:atlas', false],
     ['authors.recid:1000001', false],
+    ['aff CERN', false],
+    ['af CERN', false],
+    ['affiliation CERN', false],
+    ['affid:902725', false],
+    ['affil CERN', false],
+    ['inst CERN', false],
+    ['institution CERN', false],
+    ['zzqq and inst zzqqxxwv', false],
+    ['affiliation-id:902725', false],
+    ['(affiliation-id:902725)', false],
+    ['higgs aff', true],
+    ['affine connection zzqq', true],
+    ['afterglow zzqq', true],
+    ['instanton zzqq', true],
+    ['institutional zzqq', true],
+    ['af-ter zzqq', true],
   ])('query %j is %s as bare words', async (query, bare) => {
     const text = await notice({ query });
 
@@ -628,7 +701,7 @@ describe('zero-hit notice', () => {
 
     const text = structured<Output>(result).notice ?? '';
     expect(text).not.toMatch(/[\r\n]/);
-    expect(text).toContain('t higgs # injected \\[x\\](http://evil) &lt;b&gt;');
+    expect(text).toContain('t higgs # injected \\[x\\](http://evil) &lt;b>');
     expect(fullText(result)).not.toMatch(/^# injected/m);
   });
 });
@@ -730,6 +803,22 @@ describe('papers and format() parity', () => {
     expect(text).toContain(`**Abstract:**\n> ${richAbstract}`);
   });
 
+  it('prints the arXiv ID and DOI as written, their *, _, and ~ unescaped, so they copy back', async () => {
+    routePage(
+      literaturePage([
+        paper(1, {
+          arxiv_eprints: [{ value: '1207.7214', categories: ['hep-ex'] }],
+          dois: [{ value: '10.1234/_a*(1)~' }],
+        }),
+      ]),
+    );
+
+    const result = await run({ query: 't higgs' });
+
+    expect(structured<Output>(result).papers[0]?.doi).toBe('10.1234/_a*(1)~');
+    expect(bodyText(result)).toContain('**arXiv:** 1207.7214 (hep-ex) · **DOI:** 10.1234/_a*(1)~');
+  });
+
   it('numbers papers from the page offset', async () => {
     routePage(pageOf(2, { next: true, total: 40 }));
 
@@ -822,6 +911,125 @@ describe('papers and format() parity', () => {
   });
 });
 
+describe('publisher markup in titles and abstracts', () => {
+  it('converts a MathML title and a JATS abstract on both surfaces, cutting the snippet from the text', async () => {
+    routePage(
+      literaturePage([
+        paper(1, {
+          titles: [{ title: PUBLISHER_MARKUP.aps1331113Title }],
+          abstracts: [{ source: 'APS', value: PUBLISHER_MARKUP.aps1316657Abstract }],
+        }),
+      ]),
+    );
+
+    const result = await run({ query: 't x' });
+
+    const [only] = structured<Output>(result).papers;
+    const abstract = MARKUP_AS_TEXT.aps1316657Abstract;
+    const snippet = only?.abstractSnippet ?? '';
+    expect(only?.title).toBe(MARKUP_AS_TEXT.aps1331113Title);
+    expect(only?.abstractTruncated).toBe(true);
+    expect(abstract.startsWith(snippet)).toBe(true);
+    expect(snippet.length).toBeGreaterThan(290);
+    expect(snippet.length).toBeLessThanOrEqual(300);
+    expect(abstract.charAt(snippet.length)).toBe(' ');
+    const text = bodyText(result);
+    expect(text).toContain(
+      '### 1. Erratum: High-spin spectroscopy of ^{144}Tb: Systematic investigation of dipole bands in N=79 isotones \\[Phys. Rev. C 89, 054309 (2014)\\]',
+    );
+    expect(text).toContain(
+      `**Abstract** (truncated; cern_inspire_get_paper has it in full):\n> ${snippet}`,
+    );
+    expect(text).toContain(
+      '> Prompt thermal neutron capture γ-ray cross sections σ_γ were measured',
+    );
+    expect(text).not.toContain('&lt;');
+  });
+
+  it('measures the snippet cap on the converted text, so markup alone never truncates it', async () => {
+    const markup = `<p><inline-formula><mml:math><mml:mi>γ</mml:mi></mml:math></inline-formula>-ray ${'word '.repeat(55)}end</p>`;
+    const converted = `γ-ray ${'word '.repeat(55)}end`;
+    expect(markup.length).toBeGreaterThan(300);
+    routePage(literaturePage([paper(1, { abstracts: [{ source: 'APS', value: markup }] })]));
+
+    const result = await run({ query: 't x' });
+
+    const [only] = structured<Output>(result).papers;
+    expect(only?.abstractSnippet).toBe(converted);
+    expect(only?.abstractTruncated).toBe(false);
+    expect(bodyText(result)).toContain(`**Abstract:**\n> ${converted}`);
+  });
+
+  it('renders a title that is only markup as untitled and leaves out an abstract that is only markup', async () => {
+    routePage(
+      literaturePage([
+        paper(1, {
+          titles: [{ title: '<i> </i>' }],
+          abstracts: [{ source: 'APS', value: '<p> </p><p><inline-graphic/></p>' }],
+        }),
+      ]),
+    );
+
+    const result = await run({ query: 't x' });
+
+    const [only] = structured<Output>(result).papers;
+    expect(only?.title).toBe('');
+    expect(only?.abstractSnippet).toBeUndefined();
+    const text = bodyText(result);
+    expect(text).toContain('### 1. (untitled)');
+    expect(text).not.toContain('**Abstract');
+  });
+
+  it('decodes entities once and still escapes the angle brackets and links decoding produces', async () => {
+    routePage(
+      literaturePage([
+        paper(1, {
+          titles: [
+            {
+              title:
+                '&lt;script&gt;alert(1)&lt;/script&gt; <i>[click](http://evil.example)</i> &amp;lt;b&amp;gt;',
+            },
+          ],
+        }),
+      ]),
+    );
+
+    const result = await run({ query: 't x' });
+
+    expect(structured<Output>(result).papers[0]?.title).toBe(
+      '<script>alert(1)</script> [click](http://evil.example) &lt;b&gt;',
+    );
+    const text = bodyText(result);
+    expect(text).toContain(
+      '### 1. &lt;script&gt;alert(1)&lt;/script&gt; \\[click\\](http://evil.example) &lt;b&gt;',
+    );
+    expect(text).not.toContain('<script>');
+  });
+
+  it('keeps markup-free LaTeX as received in structuredContent and escapes only what could form emphasis in content[]', async () => {
+    const abstract = 'Nb$_{3}$Sn and Nb$_{3}$Sn coils reach $p_T$ of 5 GeV.';
+    routePage(
+      literaturePage([
+        paper(1, {
+          titles: [{ title: MARKUP_FREE.aps2098257Title }],
+          abstracts: [{ source: 'arXiv', value: abstract }],
+        }),
+      ]),
+    );
+
+    const result = await run({ query: 't x' });
+
+    const [only] = structured<Output>(result).papers;
+    expect(only?.title).toBe(MARKUP_FREE.aps2098257Title);
+    expect(only?.abstractSnippet).toBe(abstract);
+    const text = bodyText(result);
+    expect(text).toContain(
+      '### 1. Measurement of the $\\nu_e-$Nucleus Charged-Current Double-Differential Cross Section at $\\left&lt; E\\_{\\nu} \\right&gt; = $ 2.4 GeV using NOvA',
+    );
+    expect(text).toContain('> Nb$\\_{3}$Sn and Nb$\\_{3}$Sn coils reach $p_T$ of 5 GeV.');
+  });
+});
+
 describe('upstream text stays out of inline markdown slots', () => {
   const LS = String.fromCharCode(0x2028);
   const NEL = String.fromCharCode(0x85);
@@ -855,7 +1063,9 @@ describe('upstream text stays out of inline markdown slots', () => {
       '### 1. Line one ## Injected heading rest more end',
     ]);
     expect(body.filter((line) => line.startsWith('**Citations:**'))).toEqual([]);
-    expect(bodyText(result)).toContain('Doe, Jane # Injected heading **Citations:** 999999');
+    expect(bodyText(result)).toContain(
+      'Doe, Jane # Injected heading \\*\\*Citations:\\*\\* 999999',
+    );
     expect(body.some((line) => line.trim() === '# Injected heading')).toBe(false);
   });
 
@@ -877,7 +1087,10 @@ describe('upstream text stays out of inline markdown slots', () => {
     );
     expect(text).toContain('Doe \\[Jane\\] &lt;J&gt;');
     expect(text).not.toContain('<script>');
-    expect(structured<Output>(result).papers[0]?.title).toContain('[the paper](http://evil');
+    // <script> is outside the markup vocabulary, so it reaches format() as text and the escape above is real.
+    expect(structured<Output>(result).papers[0]?.title).toBe(
+      'See [the paper](http://evil.example.org) <script>x</script>',
+    );
   });
 
   it('keeps every line of a multi-line abstract inside the blockquote', async () => {

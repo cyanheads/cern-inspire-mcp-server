@@ -16,6 +16,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { allResourceDefinitions } from '@/mcp-server/resources/definitions/index.js';
 import { inspireLiteratureResource } from '@/mcp-server/resources/definitions/inspire-literature.resource.js';
 import { getPaperTool } from '@/mcp-server/tools/definitions/get-paper.tool.js';
+import { MARKUP_AS_TEXT, PUBLISHER_MARKUP } from '../fixtures/inspire-markup.js';
 import {
   dataPage,
   dossierMetadata,
@@ -24,7 +25,10 @@ import {
   htmlResponse,
   jsonResponse,
   literaturePage,
+  mergedRecidResponse,
+  notFoundBody,
   rateLimitResponse,
+  TWO_RECORD_PAPERS,
 } from '../fixtures/inspire-upstream.js';
 import {
   type ServiceHarness,
@@ -195,6 +199,28 @@ describe('handler', () => {
     expect((await read(HIGGS.recid)).hepdata).toEqual({ status: 'none' });
   });
 
+  it('carries a two-record paper’s other record in hepdata.otherRecords, each linked by record number', async () => {
+    routeRecord(dossierMetadata(1, { control_number: 1797621 }));
+    routeData(dataPage(TWO_RECORD_PAPERS['1797621']));
+
+    const paper = await read('1797621');
+
+    expect(paper).toEqual(expect.schemaMatching(inspireLiteratureResource.output));
+    expect(paper.hepdata).toMatchObject({
+      recordDoi: '10.17182/hepdata.98625',
+      hepdataUrl: 'https://www.hepdata.net/record/98625',
+      otherRecords: [
+        {
+          inspireDataRecid: '2890786',
+          recordDoi: '10.17182/hepdata.156903',
+          latestVersion: 1,
+          tableCount: 1,
+          hepdataUrl: 'https://www.hepdata.net/record/156903',
+        },
+      ],
+    });
+  });
+
   it("fails the read with the availability lookup's own error instead of serving a degraded body", async () => {
     routeRecord(dossierMetadata(1));
     h.route('/data', new Response('down', { status: 503 }));
@@ -228,7 +254,7 @@ describe('handler', () => {
     expect(error.data).toMatchObject(data);
   });
 
-  it('keeps upstream strings verbatim: it returns JSON data and renders nothing', async () => {
+  it('returns JSON and renders nothing: line breaks, brackets, and non-markup angle brackets stay as received', async () => {
     routeRecord(dossierMetadata(1, { titles: [{ title: 'Title\r\nwith [brackets] <tags>' }] }));
     routeData();
 
@@ -236,12 +262,59 @@ describe('handler', () => {
 
     expect(paper.title).toBe('Title\r\nwith [brackets] <tags>');
   });
+
+  it('converts publisher markup in the title, alternate titles, and abstract to text', async () => {
+    routeRecord(
+      dossierMetadata(1, {
+        titles: [
+          { title: PUBLISHER_MARKUP.aps1331113Title },
+          { title: PUBLISHER_MARKUP.deGruyter2830751Title },
+        ],
+        abstracts: [{ source: 'Elsevier', value: PUBLISHER_MARKUP.elsevier3200944Abstract }],
+      }),
+    );
+    routeData();
+
+    const paper = await read(HIGGS.recid);
+
+    expect(paper).toEqual(expect.schemaMatching(inspireLiteratureResource.output));
+    expect(paper).toMatchObject({
+      title: MARKUP_AS_TEXT.aps1331113Title,
+      alternateTitles: [MARKUP_AS_TEXT.deGruyter2830751Title],
+      abstract: MARKUP_AS_TEXT.elsevier3200944Abstract,
+      abstractSource: 'Elsevier',
+    });
+  });
+});
+
+describe('a recid INSPIRE merged into another record', () => {
+  const MERGED = '2829718';
+  const SURVIVOR = '1797621';
+
+  it('serves the surviving record, with mergedFrom naming the recid in the URI', async () => {
+    h.route('/literature', (request) =>
+      jsonResponse(
+        new URL(request.url).searchParams.get('q') === `recid:${SURVIVOR}`
+          ? literaturePage([dossierMetadata(3, { control_number: Number(SURVIVOR) })])
+          : emptyBody(),
+      ),
+    );
+    routeData();
+    h.route(`/literature/${MERGED}`, mergedRecidResponse(SURVIVOR));
+
+    const body = await read(MERGED);
+
+    expect(body).toMatchObject({ recid: SURVIVOR, mergedFrom: MERGED, resolvedAs: 'recid' });
+    expect(inspireLiteratureResource.output?.parse(body)).toMatchObject({ mergedFrom: MERGED });
+    expect(h.requests.filter((r) => r.path === `/api/literature/${MERGED}`)).toHaveLength(1);
+  });
 });
 
 describe('paper_not_found', () => {
-  it('fails an empty record read with the declared reason, NotFound, and the recid in its data', async () => {
+  it('fails an empty record read with the declared reason, NotFound, and the recid in its data, once INSPIRE answers 404 for the recid', async () => {
     h.route('/literature', jsonResponse(emptyBody()));
     routeData(emptyBody());
+    h.route('/literature/99999999', jsonResponse(notFoundBody(), { status: 404 }));
 
     const error = await read('99999999').catch((e: unknown) => e);
 
@@ -251,6 +324,11 @@ describe('paper_not_found', () => {
       message: 'No INSPIRE literature record has recid 99999999.',
       data: { reason: 'paper_not_found', recid: '99999999' },
     });
+    expect(h.requests.map((r) => r.path).sort()).toEqual([
+      '/api/data',
+      '/api/literature',
+      '/api/literature/99999999',
+    ]);
   });
 
   it('fails a literature hit that carries no metadata', async () => {
@@ -263,6 +341,7 @@ describe('paper_not_found', () => {
   it('reports not found, not the lookup failure, when the record is missing and the availability lookup failed', async () => {
     h.route('/literature', jsonResponse(emptyBody()));
     h.route('/data', new Response('down', { status: 503 }));
+    h.route('/literature/99999999', jsonResponse(notFoundBody(), { status: 404 }));
 
     const error = await readFailure('99999999');
 

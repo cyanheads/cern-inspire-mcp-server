@@ -18,7 +18,7 @@ import {
 } from '@/mcp-server/tools/inputs.js';
 import { getInspireService } from '@/services/inspire/inspire-service.js';
 import type { FacetFilters } from '@/services/inspire/types.js';
-import { inline, quote } from '@/utils/render.js';
+import { callerEcho, identifier, inline, quote } from '@/utils/render.js';
 
 /** INSPIRE serves at most this many results of one query (`page × size`). */
 const RESULT_WINDOW = 10_000;
@@ -26,7 +26,10 @@ const RESULT_WINDOW = 10_000;
 /** Above this many matches a query is flagged as possibly mis-parsed (Design Decisions #17). */
 const BROAD_MATCH_THRESHOLD = 100_000;
 
-/** INSPIRE's short-form field operators, recognized at the start of a clause. */
+/**
+ * INSPIRE's short-form field operators, recognized at the start of a clause; the
+ * affiliation ones are every alias INSPIRE's query parser maps to `affiliation`.
+ */
 const SHORT_OPERATORS = new Set([
   'a',
   'au',
@@ -49,13 +52,19 @@ const SHORT_OPERATORS = new Set([
   'rn',
   'fa',
   'ac',
+  'aff',
+  'af',
+  'affil',
+  'affiliation',
+  'inst',
+  'institution',
 ]);
 
 /** Tokens after which a new search clause starts. */
 const CLAUSE_LEADERS = new Set(['and', 'or', 'not', 'find', 'f']);
 
-/** A `field:value` token (`refersto:recid:1`, `collaboration:atlas`), optionally after `(`. */
-const FIELD_PREFIX = /^\(*[a-z_.]+:/i;
+/** A `field:value` token (`refersto:recid:1`, `affiliation-id:902725`), optionally after `(`. */
+const FIELD_PREFIX = /^\(*[a-z_.][a-z_.-]*:/i;
 
 /** An author operator (`a`, `au`, `author`, `exactauthor:`). */
 const AUTHOR_OPERATOR = /(?:^|[\s(])(?:a|au|author)\s|exactauthor:/i;
@@ -80,7 +89,11 @@ const SORTS = ['relevance', 'mostrecent', 'mostcited'] as const;
 const literatureHitSchema = z
   .object({
     recid: z.string().describe('INSPIRE literature record ID; pass to cern_inspire_get_paper.'),
-    title: z.string().describe('Title as INSPIRE records it (LaTeX left as published).'),
+    title: z
+      .string()
+      .describe(
+        'Title as text: publisher HTML, JATS, and MathML converted (scripts as _x or ^{xy}), LaTeX left as published.',
+      ),
     firstAuthor: z
       .object({
         name: z.string().describe('First author, "Surname, Given names".'),
@@ -125,7 +138,7 @@ const literatureHitSchema = z
       .string()
       .optional()
       .describe(
-        'Start of the abstract (arXiv-sourced when available), up to 300 characters at a word boundary.',
+        'Start of the abstract as text (arXiv-sourced when available; publisher markup converted, LaTeX left as published), up to 300 characters at a word boundary.',
       ),
     abstractTruncated: z
       .boolean()
@@ -168,9 +181,9 @@ function renderHit(hit: LiteratureHitOutput, position: number): string[] {
   if (hit.arxivId) {
     const categories =
       hit.arxivCategories.length > 0 ? ` (${hit.arxivCategories.map(inline).join(', ')})` : '';
-    ids.push(`**arXiv:** ${inline(hit.arxivId)}${categories}`);
+    ids.push(`**arXiv:** ${identifier(hit.arxivId)}${categories}`);
   }
-  if (hit.doi) ids.push(`**DOI:** ${inline(hit.doi)}`);
+  if (hit.doi) ids.push(`**DOI:** ${identifier(hit.doi)}`);
   if (hit.publication) ids.push(`**Publication:** ${inline(hit.publication)}`);
   if (ids.length > 0) lines.push(ids.join(' · '));
 
@@ -290,7 +303,7 @@ export const searchLiteratureTool = tool('cern_inspire_search_literature', {
       code: JsonRpcErrorCode.ServiceUnavailable,
       when: 'The INSPIRE body exceeded the byte ceiling, was HTML where JSON was expected, or was invalid JSON.',
       recovery:
-        'Retry this call in a few seconds; if it fails again, retry cern_inspire_search_literature with a smaller size.',
+        'Retry this call in a few seconds; if it fails again, INSPIRE is likely serving an error page, so wait a minute before retrying cern_inspire_search_literature with the same page and size.',
       thrownBy: 'service',
     },
   ],
@@ -396,7 +409,7 @@ function zeroHitNotice(
       `Page ${input.page} is past the last page (${Math.ceil(total / input.size)}); request a lower page.`,
     ];
   }
-  const fragments = [`No INSPIRE literature matched "${inline(input.query)}".`];
+  const fragments = [`No INSPIRE literature matched "${callerEcho(input.query)}".`];
   if (hasFacetFilters(filters)) {
     fragments.push(
       `Filters narrowed the set (${formatAppliedFilters(filters)}); drop them to widen — multiple document_types or subjects must all hold.`,
@@ -404,7 +417,7 @@ function zeroHitNotice(
   }
   if (!hasFieldOperator(input.query)) {
     fragments.push(
-      'Bare words search all fields; use "t <words>" for titles or "a <name>" for authors — see cern_inspire_list_reference topic search_syntax.',
+      'Bare words search all fields; use "t WORDS" for titles or "a NAME" for authors — see cern_inspire_list_reference topic search_syntax.',
     );
   }
   if (AUTHOR_OPERATOR.test(input.query) && BAI_TOKEN.test(input.query)) {

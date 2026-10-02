@@ -9,24 +9,59 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { blankAsUnset, paperInput } from '@/mcp-server/tools/inputs.js';
+import { blankAsUnset, hepdataRecordRoute, paperInput } from '@/mcp-server/tools/inputs.js';
+import { hepdataRecordNumber } from '@/services/inspire/identifiers.js';
 import { getInspireService } from '@/services/inspire/inspire-service.js';
-import { atLineStart, inline, printUrl, quote } from '@/utils/render.js';
+import { atLineStart, callerEcho, identifier, inline, printUrl, quote } from '@/utils/render.js';
 
 /** Upper bound on `max_authors`; the full count is always in `authorCount`. */
 const MAX_AUTHORS_LIMIT = 500;
 
+/** The facts of one HEPData record, for the `hepdata` block and each of its `otherRecords`. */
+const hepdataRecordFields = {
+  inspireDataRecid: z
+    .string()
+    .optional()
+    .describe("Record ID of the HEPData entry in INSPIRE's data collection."),
+  recordDoi: z.string().optional().describe('HEPData record DOI; cite it when reusing the data.'),
+  latestVersion: z.number().optional().describe('Latest HEPData record version.'),
+  tableCount: z.number().optional().describe('Number of tables in the latest version.'),
+  hepdataUrl: z
+    .string()
+    .optional()
+    .describe(
+      "The HEPData record page on hepdata.net, where the table values are read: keyed by the record number in recordDoi, or by this paper's recid (/record/ins followed by the recid) when recordDoi names no number.",
+    ),
+};
+
 /** The `get_paper` dossier — the tool's output and the literature resource's body. */
 export const paperDossierSchema = z.object({
   recid: z.string().describe('INSPIRE literature record ID.'),
+  mergedFrom: z
+    .string()
+    .optional()
+    .describe(
+      'The recid asked for, when INSPIRE had merged that record into this one and redirects it here; cite and query this record by recid.',
+    ),
   resolvedAs: z
     .enum(['recid', 'arxiv', 'doi'])
     .describe('Which identifier form the paper input was resolved from.'),
-  title: z.string().describe('Title as INSPIRE records it (LaTeX left as published).'),
+  title: z
+    .string()
+    .describe(
+      'Title as text: publisher HTML, JATS, and MathML converted (scripts as _x or ^{xy}), LaTeX left as published.',
+    ),
   alternateTitles: z
     .array(z.string().describe('An alternate title.'))
-    .describe('Other titles INSPIRE records (translations, preprint titles).'),
-  abstract: z.string().optional().describe('Full abstract (arXiv-sourced when available).'),
+    .describe(
+      'Other titles INSPIRE records (translations, preprint titles), converted to text like title.',
+    ),
+  abstract: z
+    .string()
+    .optional()
+    .describe(
+      'Full abstract as text (arXiv-sourced when available): publisher markup converted like title, LaTeX left as published.',
+    ),
   abstractSource: z
     .string()
     .optional()
@@ -65,7 +100,12 @@ export const paperDossierSchema = z.object({
       z
         .object({
           name: z.string().describe('Experiment legacy name (e.g. CERN-LHC-ATLAS).'),
-          recid: z.string().optional().describe('INSPIRE experiment record ID, when linked.'),
+          recid: z
+            .string()
+            .optional()
+            .describe(
+              'INSPIRE experiment record ID, when linked; pass as query to cern_inspire_search_experiments for the experiment record.',
+            ),
         })
         .describe('One linked experiment.'),
     )
@@ -168,20 +208,13 @@ export const paperDossierSchema = z.object({
         .describe(
           'available: HEPData holds tables; none: it does not; lookup_failed: could not check.',
         ),
-      inspireDataRecid: z
-        .string()
+      ...hepdataRecordFields,
+      otherRecords: z
+        .array(z.object(hepdataRecordFields).describe('Another HEPData record of this paper.'))
         .optional()
-        .describe("Record ID of the HEPData entry in INSPIRE's data collection."),
-      recordDoi: z
-        .string()
-        .optional()
-        .describe('HEPData record DOI; cite it when reusing the data.'),
-      latestVersion: z.number().optional().describe('Latest HEPData record version.'),
-      tableCount: z.number().optional().describe('Number of tables in the latest version.'),
-      hepdataUrl: z
-        .string()
-        .optional()
-        .describe('The HEPData record page on hepdata.net, where the table values are read.'),
+        .describe(
+          "The paper's other HEPData records, in ascending record number, when it has more than one (at most 9 listed); the fields above describe the lowest-numbered record among the up to 10 the lookup returns.",
+        ),
     })
     .describe("HEPData availability for the paper's numerical tables."),
 });
@@ -205,13 +238,24 @@ function renderPublication(p: PaperDossierOutput['publications'][number]): strin
 function renderAuthor(a: PaperDossierOutput['authors'][number]): string {
   const ids = [
     a.recid && `author recid ${a.recid}`,
-    a.bai && `BAI ${inline(a.bai)}`,
-    a.orcid && `ORCID ${inline(a.orcid)}`,
+    a.bai && `BAI ${identifier(a.bai)}`,
+    a.orcid && `ORCID ${identifier(a.orcid)}`,
   ].filter(Boolean);
   const affiliations =
     a.affiliations.length > 0 ? ` — ${a.affiliations.map(inline).join('; ')}` : '';
   return `- **${inline(a.name)}**${ids.length > 0 ? ` (${ids.join(' · ')})` : ''}${affiliations}`;
 }
+
+type HepdataRecordOutput = NonNullable<PaperDossierOutput['hepdata']['otherRecords']>[number];
+
+/** The labelled DOI, version, table count, and data recid of one HEPData record. */
+const hepdataFacts = (r: HepdataRecordOutput) =>
+  [
+    r.recordDoi && `**Record DOI:** ${identifier(r.recordDoi)}`,
+    r.latestVersion !== undefined && `**Latest version:** ${r.latestVersion}`,
+    r.tableCount !== undefined && `**Tables:** ${r.tableCount}`,
+    r.inspireDataRecid && `**INSPIRE data recid:** ${r.inspireDataRecid}`,
+  ].filter(Boolean);
 
 function renderHepdata(h: PaperDossierOutput['hepdata']): string[] {
   const lines = ['### HEPData'];
@@ -221,22 +265,58 @@ function renderHepdata(h: PaperDossierOutput['hepdata']): string[] {
     lookup_failed: 'lookup_failed — availability could not be checked',
   }[h.status];
   lines.push(`**Status:** ${status}`);
-  const facts = [
-    h.recordDoi && `**Record DOI:** ${inline(h.recordDoi)}`,
-    h.latestVersion !== undefined && `**Latest version:** ${h.latestVersion}`,
-    h.tableCount !== undefined && `**Tables:** ${h.tableCount}`,
-    h.inspireDataRecid && `**INSPIRE data recid:** ${h.inspireDataRecid}`,
-  ].filter(Boolean);
+  const facts = hepdataFacts(h);
   if (facts.length > 0) lines.push(facts.join(' · '));
   if (h.hepdataUrl) lines.push(`**Record page:** ${printUrl(h.hepdataUrl)}`);
+  if (h.otherRecords && h.otherRecords.length > 0) {
+    lines.push(
+      `**Other records (${h.otherRecords.length}):**`,
+      ...h.otherRecords.map(
+        (r) =>
+          `- ${[...hepdataFacts(r), r.hepdataUrl && `**Record page:** ${printUrl(r.hepdataUrl)}`]
+            .filter(Boolean)
+            .join(' · ')}`,
+      ),
+    );
+  }
   return lines;
+}
+
+/** How a notice names a HEPData record: its DOI, else its INSPIRE data recid. */
+const hepdataLabel = (r: HepdataRecordOutput) =>
+  r.recordDoi
+    ? identifier(r.recordDoi)
+    : r.inspireDataRecid
+      ? `INSPIRE data recid ${r.inspireDataRecid}`
+      : 'a record with no DOI or recid';
+
+/**
+ * The notice for a paper with more than one HEPData record: which record the
+ * `hepdata` fields describe and which `otherRecords` lists, or, when INSPIRE links
+ * more records than one lookup returns, the total and where to list them all.
+ */
+function multiRecordNotice(paper: PaperDossierOutput, recordCount: number): string | undefined {
+  const others = paper.hepdata.otherRecords ?? [];
+  const shown = 1 + others.length;
+  if (paper.hepdata.status !== 'available' || Math.max(shown, recordCount) === 1) return;
+  const primary = hepdataLabel(paper.hepdata);
+  if (recordCount <= shown) {
+    const listed = new Intl.ListFormat('en', { type: 'conjunction' }).format(
+      others.map(hepdataLabel),
+    );
+    return `INSPIRE links ${shown} HEPData records to this paper: hepdata describes ${primary}, the lowest record number, and hepdata.otherRecords lists ${listed}.`;
+  }
+  return `INSPIRE links ${recordCount} HEPData records to this paper and ${shown} ${shown === 1 ? 'is' : 'are'} shown: hepdata describes ${primary}, the lowest record number shown${others.length > 0 ? `, and hepdata.otherRecords lists the other ${others.length}` : ''}; call cern_inspire_search_hepdata with query "literature.control_number:${paper.recid}" to list all ${recordCount}.`;
 }
 
 /** Markdown for one dossier. */
 function renderPaperDossier(paper: PaperDossierOutput): string {
   const lines = [`## ${inline(paper.title) || '(untitled)'}`];
+  const resolvedFrom = paper.mergedFrom
+    ? `${paper.resolvedAs} ${identifier(paper.mergedFrom)}, which INSPIRE merged into this record`
+    : paper.resolvedAs;
   lines.push(
-    `**recid:** ${paper.recid} (resolved from ${paper.resolvedAs}) · **INSPIRE:** ${printUrl(paper.inspireUrl)}`,
+    `**recid:** ${paper.recid} (resolved from ${resolvedFrom}) · **INSPIRE:** ${printUrl(paper.inspireUrl)}`,
   );
   const dates = [
     paper.date && `**Date:** ${inline(paper.date)}`,
@@ -264,12 +344,12 @@ function renderPaperDossier(paper: PaperDossierOutput): string {
 
   const ids = [
     paper.arxivId &&
-      `**arXiv:** ${inline(paper.arxivId)}${
+      `**arXiv:** ${identifier(paper.arxivId)}${
         paper.arxivCategories.length > 0 ? ` (${paper.arxivCategories.map(inline).join(', ')})` : ''
       }`,
-    paper.dois.length > 0 && `**DOIs:** ${paper.dois.map(inline).join(', ')}`,
+    paper.dois.length > 0 && `**DOIs:** ${paper.dois.map(identifier).join(', ')}`,
     paper.reportNumbers.length > 0 &&
-      `**Report numbers:** ${paper.reportNumbers.map(inline).join(', ')}`,
+      `**Report numbers:** ${paper.reportNumbers.map(identifier).join(', ')}`,
   ].filter(Boolean);
   if (ids.length > 0) lines.push(ids.join(' · '));
   if (paper.subjects.length > 0)
@@ -304,10 +384,10 @@ function renderPaperDossier(paper: PaperDossierOutput): string {
     ...paper.authors.map(renderAuthor),
   );
   if (paper.keywords.length > 0) {
-    lines.push('', `**Keywords:** ${paper.keywords.map(inline).join('; ')}`);
+    lines.push('', `**Keywords:** ${paper.keywords.map(identifier).join('; ')}`);
   }
   if (paper.texkeys.length > 0) {
-    lines.push('', `**Texkeys:** ${paper.texkeys.map(inline).join(', ')}`);
+    lines.push('', `**Texkeys:** ${paper.texkeys.map(identifier).join(', ')}`);
   }
   if (paper.urls.length > 0) {
     lines.push(
@@ -362,7 +442,7 @@ export const getPaperTool = tool('cern_inspire_get_paper', {
       .string()
       .optional()
       .describe(
-        'Guidance when the author list was capped or HEPData availability could not be checked.',
+        'Guidance when the recid asked for was merged into this record, the author list was capped, HEPData availability could not be checked, or the paper has more than one HEPData record.',
       ),
   },
   errors: [
@@ -408,28 +488,49 @@ export const getPaperTool = tool('cern_inspire_get_paper', {
     const inspire = getInspireService();
     const lookup = await inspire.getPaper(input.paper, input.max_authors, inspire.beginCall(ctx));
     if (!lookup) {
+      const record = hepdataRecordNumber(input.paper);
+      if (record) {
+        throw ctx.fail(
+          'paper_not_found',
+          `No INSPIRE literature record carries "${callerEcho(input.paper)}", a DOI of HEPData record ${record}, which names the data rather than a paper.`,
+          {
+            paper: input.paper,
+            recovery: { hint: `To reach its paper, ${hepdataRecordRoute(record)}.` },
+          },
+        );
+      }
       throw ctx.fail(
         'paper_not_found',
-        `No INSPIRE literature record matches "${inline(input.paper)}".`,
+        `No INSPIRE literature record matches "${callerEcho(input.paper)}".`,
         { paper: input.paper },
       );
     }
-    const { paper, authorsInRecord } = lookup;
+    const { paper, authorsInRecord, hepdataRecordCount = 0 } = lookup;
     const shown = paper.authors.length;
     ctx.enrich({ shown });
 
     const notices: string[] = [];
+    if (paper.mergedFrom) {
+      notices.push(
+        `INSPIRE merged recid ${identifier(paper.mergedFrom)} into recid ${paper.recid} and redirects the old recid here; cite and query this paper as recid:${paper.recid}.`,
+      );
+    }
+    const capped = authorsInRecord > input.max_authors;
+    if (capped) {
+      notices.push(
+        input.max_authors < MAX_AUTHORS_LIMIT
+          ? `Showing ${shown} of ${authorsInRecord} authors; raise max_authors (up to ${MAX_AUTHORS_LIMIT}) to list more.`
+          : `Showing ${shown} of ${authorsInRecord} authors, the max_authors maximum; the other ${authorsInRecord - shown} are not listed. To check whether someone is on this paper, call cern_inspire_search_literature with query "recid:${paper.recid} and a BAI or NAME", which returns the paper when they are a listed author.`,
+      );
+    }
     if (paper.hepdata.status === 'lookup_failed') {
       notices.push(
         `HEPData availability could not be checked; retry cern_inspire_get_paper, or call cern_inspire_search_hepdata with query "literature.control_number:${paper.recid}".`,
       );
     }
-    if (authorsInRecord > input.max_authors) {
-      notices.unshift(
-        input.max_authors < MAX_AUTHORS_LIMIT
-          ? `Showing ${shown} of ${authorsInRecord} authors; raise max_authors (up to ${MAX_AUTHORS_LIMIT}) to list more.`
-          : `Showing ${shown} of ${authorsInRecord} authors, the max_authors maximum; the other ${authorsInRecord - shown} are not listed. To check whether someone is on this paper, call cern_inspire_search_literature with query "recid:${paper.recid} and a <BAI or name>", which returns the paper when they are a listed author.`,
-      );
+    const records = multiRecordNotice(paper, hepdataRecordCount);
+    if (records) notices.push(records);
+    if (capped) {
       ctx.enrich.truncated({ shown, cap: input.max_authors, guidance: notices.join(' ') });
     } else if (notices.length > 0) {
       ctx.enrich.notice(notices.join(' '));

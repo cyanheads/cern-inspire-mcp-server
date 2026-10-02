@@ -33,6 +33,7 @@ import {
   splitCitationEntries,
   toAuthorProfile,
   toCitationSummary,
+  toCitationsByYear,
   toExperimentRecord,
   toHepdataAvailability,
   toHepdataRecord,
@@ -43,11 +44,12 @@ import type {
   AuthorSearchPage,
   CitationExport,
   CitationExportParams,
-  CitationSummary,
+  CitationSummaryLookup,
   CitationSummaryParams,
   ExperimentSearchPage,
   FacetFilters,
   HepdataAvailability,
+  HepdataLookup,
   HepdataSearchPage,
   HepdataSearchParams,
   LiteratureSearchPage,
@@ -55,15 +57,18 @@ import type {
   PaperLookup,
   RawAuthorMetadata,
   RawCitationSummaryResponse,
+  RawCitationsByYearResponse,
   RawDataMetadata,
   RawExperimentMetadata,
   RawLiteratureMetadata,
   RawSearchEnvelope,
   ResolvedAuthor,
   ResolvedPaper,
+  SeriesIgnoredFilter,
 } from './types.js';
 
-const BASE_URL = 'https://inspirehep.net/api';
+const ORIGIN = 'https://inspirehep.net';
+const BASE_URL = `${ORIGIN}/api`;
 const REPO_URL = 'https://github.com/cyanheads/cern-inspire-mcp-server';
 
 /** One budget per tool call, inside a 60 s client timeout. */
@@ -73,6 +78,32 @@ const ATTEMPT_TIMEOUT_MS = 15_000;
 const MAX_BYTES = 8 * 1024 * 1024;
 /** INSPIRE asks for at least 5 s after a 429 when it sends no Retry-After. */
 const DEFAULT_RETRY_AFTER_S = 5;
+/**
+ * The citations-by-year series' own budget: one attempt's timeout. Its time grows
+ * with the matched set (0.5 s for an author, 4 s at 10,000 records, 10.5 s at
+ * 122,000; 278,875 took 25 s and 644,000 drew a 500 after 30 s) while the summary
+ * beside it stays near 0.5 s, so a broad query's series is cut here, not retried.
+ */
+export const CITATIONS_BY_YEAR_BUDGET_MS = ATTEMPT_TIMEOUT_MS;
+/**
+ * Past this many matched records INSPIRE takes longer than the series' budget to
+ * answer it cold (2026-10-01: 121,921 records in 10.5 s, 149,688 in 16.8 s), so
+ * the series is cut early instead of waited on.
+ */
+export const BROAD_SERIES_RECORDS = 150_000;
+/**
+ * How long after the facet requests start a broad query's series still may land:
+ * INSPIRE answers a series it has cached in 0.2–0.5 s, whatever the matched set.
+ */
+const BROAD_SERIES_CUT_MS = 2_000;
+/** In-flight ceiling of the INSPIRE pacer, which every request shares. */
+const INSPIRE_MAX_CONCURRENT = 4;
+/**
+ * Citations-by-year series in flight at once. A series holds an INSPIRE slot for
+ * as long as INSPIRE takes (about 11 s for CERN's ~77,000 records, up to its 15 s
+ * budget), so this leaves at least two of the four slots to every other request.
+ */
+const SERIES_MAX_CONCURRENT = 2;
 
 const LITERATURE_SEARCH_FIELDS = [
   'control_number',
@@ -175,11 +206,27 @@ const HEPDATA_SEARCH_FIELDS = [
 ].join(',');
 
 const HEPDATA_AVAILABILITY_FIELDS = 'control_number,dois.value,dois.material';
+/**
+ * Data records read per paper. No paper links more than 2 of INSPIRE's 11,633
+ * (2026-10-01); a paper past this many gets its total in a notice.
+ */
+const HEPDATA_RECORDS_PER_PAPER = 10;
 
 /** The recid, plus the identifiers a resolve hit is checked against. */
 const RESOLVE_FIELDS = 'control_number,dois.value,arxiv_eprints.value';
 
-type InspirePath = '/literature' | '/literature/facets' | '/authors' | '/experiments' | '/data';
+/** The statuses INSPIRE answers a merged recid's record URL with, pointing at the record it was merged into. */
+const REDIRECT_STATUSES = [301, 302, 303, 307, 308];
+/** Merged-record redirects one paper read follows (each merged recid probed on 2026-10-01 took one). */
+const MAX_MERGE_REDIRECTS = 3;
+
+type InspirePath =
+  | '/literature'
+  | `/literature/${string}`
+  | '/literature/facets'
+  | '/authors'
+  | '/experiments'
+  | '/data';
 
 /** Every query parameter INSPIRE is ever sent. Caller keys never reach the URL. */
 interface InspireParams {
@@ -218,7 +265,8 @@ function buildUrl(path: InspirePath, params: InspireParams): string {
     if (Array.isArray(value)) for (const item of value) search.append(name, item);
     else search.append(name, String(value));
   }
-  return `${BASE_URL}${path}?${search}`;
+  const query = search.toString();
+  return query ? `${BASE_URL}${path}?${query}` : `${BASE_URL}${path}`;
 }
 
 /** The facet params a set of filters maps to; `earliest_date` uses open ends (`2012--`, `--1990`). */
@@ -241,7 +289,18 @@ export interface InspireCall {
   readonly ctx: Context;
   /** Epoch ms after which no request in this call may run. */
   readonly deadline: number;
+  /** Abandons a request the call no longer needs; `ctx.signal` still cancels it too. */
+  readonly signal?: AbortSignal;
 }
+
+/** The statuses one request returns to its reader, and whether it follows redirects. */
+interface ExchangeOptions {
+  accept: readonly number[];
+  redirect: NonNullable<RequestInit['redirect']>;
+}
+
+/** Every search, facet, and export request: a 200 body, or INSPIRE's 400 or 429 mapped to a reason. */
+const SEARCH_EXCHANGE: ExchangeOptions = { accept: [200, 400, 429], redirect: 'follow' };
 
 /** Constructor options; `fetch` and `pacer` are the test seams. */
 export interface InspireServiceOptions {
@@ -264,7 +323,7 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 /**
  * The Unicode tag block (U+E0000–E007F): invisible characters that can spell out
  * hidden text and have no use in INSPIRE metadata. Dropped from every decoded
- * string, so `structuredContent` never carries them; other text stays as received.
+ * string, so `structuredContent` never carries them; decoding changes nothing else.
  */
 const TAG_CHARACTERS = /[\u{E0000}-\u{E007F}]/gu;
 
@@ -314,6 +373,28 @@ function parseCitationSummary(text: string): RawCitationSummaryResponse {
   return body as unknown as RawCitationSummaryResponse;
 }
 
+function parseCitationsByYear(text: string): RawCitationsByYearResponse {
+  const body = parseJson(text);
+  if (
+    !isRecord(body) ||
+    !isRecord(body.aggregations) ||
+    !isRecord(body.aggregations.citations_by_year) ||
+    !isRecord(body.aggregations.citations_by_year.value)
+  ) {
+    throw unreadable('INSPIRE returned JSON without the citations_by_year aggregation.');
+  }
+  return body as unknown as RawCitationsByYearResponse;
+}
+
+/** The citation-summary filters the citations-by-year facet ignores (verified 2026-10-01). */
+function seriesIgnoredFilters(params: CitationSummaryParams): SeriesIgnoredFilter[] {
+  return [
+    ...(params.yearFrom !== undefined ? ['yearFrom' as const] : []),
+    ...(params.yearTo !== undefined ? ['yearTo' as const] : []),
+    ...(params.excludeSelfCitations ? ['excludeSelfCitations' as const] : []),
+  ];
+}
+
 /**
  * An export body must be BibTeX/LaTeX text, returned with tag characters dropped;
  * JSON or HTML on a 200 is `upstream_unreadable`.
@@ -353,6 +434,22 @@ function carriesPaperId(
   );
 }
 
+/**
+ * The recid a merged record's redirect names. The `Location` (absolute or
+ * relative) must be an INSPIRE literature record URL with a readable recid;
+ * anything else is `upstream_unreadable`, and its target is never requested.
+ */
+function redirectedRecid(location: string | null, recid: string): string {
+  const target = location === null ? null : URL.parse(location, `${BASE_URL}/literature/${recid}`);
+  const path =
+    target?.origin === ORIGIN ? /^\/api\/literature\/(\d+)\/?$/.exec(target.pathname) : null;
+  const survivor = readRecid(path?.[1]);
+  if (survivor === undefined) {
+    throw unreadable(`INSPIRE redirected recid ${recid} somewhere other than a literature record.`);
+  }
+  return survivor;
+}
+
 /** `Retry-After` as seconds (delta-seconds or HTTP-date), else INSPIRE's documented 5 s. */
 function retryAfterSeconds(headers: Headers): number {
   const header = headers.get('retry-after')?.trim();
@@ -366,6 +463,12 @@ function retryAfterSeconds(headers: Headers): number {
 export class InspireService {
   private readonly fetchImpl: typeof fetch;
   private readonly pacer: Pacer;
+  /**
+   * Admits citations-by-year series to the INSPIRE pacer at most
+   * `SERIES_MAX_CONCURRENT` at a time. It sets no rate of its own: each series
+   * still starts through `pacer`, which keeps the start rate and the 429 cooldown.
+   */
+  private readonly seriesGate: Pacer;
   private readonly userAgent: string;
 
   constructor(options: InspireServiceOptions) {
@@ -375,9 +478,13 @@ export class InspireService {
       createPacer({
         name: 'inspire',
         limits: [{ requests: 12, perMs: 5_000 }],
-        maxConcurrent: 4,
+        maxConcurrent: INSPIRE_MAX_CONCURRENT,
         cooldown: { baseMs: 5_000, maxMs: 30_000 },
       });
+    this.seriesGate = createPacer({
+      name: 'inspire-series',
+      maxConcurrent: SERIES_MAX_CONCURRENT,
+    });
     this.userAgent = `cern-inspire-mcp-server/${options.version} (+${REPO_URL})`;
   }
 
@@ -386,9 +493,10 @@ export class InspireService {
     return { ctx, deadline: Date.now() + budgetMs };
   }
 
-  /** Releases the pacer's timer and rejects queued waiters. */
+  /** Releases both pacers' timers and rejects their queued waiters. */
   dispose(): void {
     this.pacer.dispose();
+    this.seriesGate.dispose();
   }
 
   // ─── Literature ───────────────────────────────────────────────────────────
@@ -458,11 +566,16 @@ export class InspireService {
 
   /**
    * The `get_paper` dossier: resolves the identifier, then reads the record and
-   * its HEPData availability in parallel. `undefined` when the identifier matches
-   * no record. A failed availability lookup degrades to `hepdata.status:
-   * 'lookup_failed'` — except a cancelled call or an input-class rejection, which
-   * rethrow — unless `requireHepdata` is set, when it throws its own error once the
-   * record is known to exist. Any failure of the resolve or the record read throws.
+   * its HEPData availability in parallel. When the `recid:N` search returns no
+   * hit, INSPIRE may have merged the record into another and kept N as a
+   * redirect, which its search does not follow: the record URL is asked where N
+   * went, and the record and availability are read again for the recid it names
+   * (`mergedFrom` then holds N), up to `MAX_MERGE_REDIRECTS` times. `undefined`
+   * when the identifier matches no record. A failed availability lookup degrades
+   * to `hepdata.status: 'lookup_failed'` — except a cancelled call or an
+   * input-class rejection, which rethrow — unless `requireHepdata` is set, when it
+   * throws its own error once the record is known to exist. Any failure of the
+   * resolve, a record read, or a redirect lookup throws.
    */
   async getPaper(
     paper: string,
@@ -473,38 +586,98 @@ export class InspireService {
     const resolved = await this.resolvePaper(paper, call);
     if (!resolved) return;
 
-    const [record, availability] = await Promise.allSettled([
-      this.send(
-        '/literature',
-        { q: `recid:${resolved.recid}`, fields: PAPER_DOSSIER_FIELDS, size: 1 },
-        call,
-        'getPaper',
-        parseSearchEnvelope<RawLiteratureMetadata>,
-      ),
-      this.getHepdataAvailability(resolved.recid, call),
-    ]);
-    if (record.status === 'rejected') throw record.reason;
-    const hit = record.value.hits.hits[0];
-    if (!hit?.metadata) return;
-    if (availability.status === 'rejected' && options.requireHepdata) throw availability.reason;
-
-    const hepdata: HepdataAvailability =
-      availability.status === 'fulfilled'
-        ? availability.value
-        : this.degradeAvailability(availability.reason, resolved.recid, call);
-    return toPaperLookup(hit.metadata, hit.id, resolved.resolvedAs, hepdata, maxAuthors);
+    let recid = resolved.recid;
+    for (let redirects = 0; ; redirects++) {
+      const [record, availability] = await Promise.allSettled([
+        this.send(
+          '/literature',
+          { q: `recid:${recid}`, fields: PAPER_DOSSIER_FIELDS, size: 1 },
+          call,
+          'getPaper',
+          parseSearchEnvelope<RawLiteratureMetadata>,
+        ),
+        this.getHepdataAvailability(recid, call),
+      ]);
+      if (record.status === 'rejected') throw record.reason;
+      const [hit] = record.value.hits.hits;
+      if (hit) {
+        if (!hit.metadata) return;
+        const resolution = {
+          resolvedAs: resolved.resolvedAs,
+          ...(recid === resolved.recid ? {} : { mergedFrom: resolved.recid }),
+        };
+        if (availability.status === 'rejected') {
+          if (options.requireHepdata) throw availability.reason;
+          const failed = this.degradeAvailability(availability.reason, recid, call);
+          return toPaperLookup(hit.metadata, hit.id, resolution, failed, maxAuthors);
+        }
+        const { availability: hepdata, recordCount } = availability.value;
+        return {
+          ...toPaperLookup(hit.metadata, hit.id, resolution, hepdata, maxAuthors),
+          hepdataRecordCount: recordCount,
+        };
+      }
+      if (redirects === MAX_MERGE_REDIRECTS) {
+        throw unreadable(
+          `INSPIRE redirected recid ${resolved.recid} through more than ${MAX_MERGE_REDIRECTS} merged records.`,
+        );
+      }
+      const survivor = await this.mergedInto(recid, call);
+      if (survivor === undefined) return;
+      recid = survivor;
+    }
   }
 
-  /** HEPData availability for one paper recid, from INSPIRE's `data` collection. */
-  async getHepdataAvailability(recid: string, call: InspireCall): Promise<HepdataAvailability> {
+  /**
+   * Where INSPIRE sends a recid its search does not return: `GET
+   * /literature/<recid>` with redirects not followed. A merged record answers with
+   * a redirect to the record it was merged into, whose recid is returned. A recid
+   * INSPIRE does not hold (404) or has deleted (410) gives `undefined`, and so does
+   * one it serves (200) although its search returns nothing, which is logged.
+   */
+  private mergedInto(recid: string, call: InspireCall): Promise<string | undefined> {
+    return this.request(
+      `/literature/${recid}`,
+      {},
+      call,
+      'followMergedRecid',
+      (response) => {
+        if (REDIRECT_STATUSES.includes(response.status)) {
+          return redirectedRecid(response.headers.get('location'), recid);
+        }
+        if (response.status === 200) {
+          call.ctx.log.warning(
+            'INSPIRE serves a recid its search does not return; reporting it as not found',
+            { recid },
+          );
+        }
+        return;
+      },
+      { accept: [200, ...REDIRECT_STATUSES, 404, 410, 429], redirect: 'manual' },
+    );
+  }
+
+  /**
+   * HEPData availability for one paper recid, from INSPIRE's `data` collection:
+   * up to `HEPDATA_RECORDS_PER_PAPER` of its data records in one request, and
+   * INSPIRE's total.
+   */
+  async getHepdataAvailability(recid: string, call: InspireCall): Promise<HepdataLookup> {
     const envelope = await this.send(
       '/data',
-      { q: `literature.control_number:${recid}`, fields: HEPDATA_AVAILABILITY_FIELDS, size: 1 },
+      {
+        q: `literature.control_number:${recid}`,
+        fields: HEPDATA_AVAILABILITY_FIELDS,
+        size: HEPDATA_RECORDS_PER_PAPER,
+      },
       call,
       'getHepdataAvailability',
       parseSearchEnvelope<RawDataMetadata>,
     );
-    return toHepdataAvailability(envelope, recid);
+    return {
+      availability: toHepdataAvailability(envelope, recid),
+      recordCount: envelope.hits.total,
+    };
   }
 
   private degradeAvailability(
@@ -525,25 +698,61 @@ export class InspireService {
   }
 
   /**
-   * INSPIRE's citation entries for a literature query. Requests `size + 1`
-   * entries; `truncated` is true when the extra one came back. Zero matches is an
-   * empty body and an empty `entries`.
+   * INSPIRE's citation entries for one page of a literature query. Page 1 is one
+   * request for `size + 1` entries, truncated when the extra one came back. A
+   * later page cannot carry that probe, since INSPIRE's pages sit `size` apart: it
+   * sends `page` and `size` as given, with one `fields=control_number&size=1`
+   * search on the same query in parallel for the match total. The total sets
+   * `truncated`, and a page at or past it returns no entries, because INSPIRE
+   * answers a past-the-end page of an OR query with a leftover entry. A failed
+   * total request never fails the page: the page returns as INSPIRE sent it, with
+   * no `total`, unless the call was cancelled. Zero matches is an empty body and
+   * an empty `entries`.
    */
   async exportCitations(params: CitationExportParams, call: InspireCall): Promise<CitationExport> {
-    const text = await this.send(
-      '/literature',
-      {
-        q: params.query,
-        sort: sortParam(params.sort),
-        size: params.size + 1,
-        format: params.format,
-      },
-      call,
-      'exportCitations',
-      parseExportText,
-    );
-    const entries = splitCitationEntries(text, params.format);
-    return { entries: entries.slice(0, params.size), truncated: entries.length > params.size };
+    const exportPage = async (size: number, page?: number) =>
+      splitCitationEntries(
+        await this.send(
+          '/literature',
+          { q: params.query, sort: sortParam(params.sort), size, page, format: params.format },
+          call,
+          'exportCitations',
+          parseExportText,
+        ),
+        params.format,
+      );
+
+    if (params.page === 1) {
+      const entries = await exportPage(params.size + 1);
+      return { entries: entries.slice(0, params.size), truncated: entries.length > params.size };
+    }
+
+    const [page, count] = await Promise.allSettled([
+      exportPage(params.size, params.page),
+      this.send(
+        '/literature',
+        { q: params.query, fields: 'control_number', size: 1 },
+        call,
+        'exportCitationsTotal',
+        parseSearchEnvelope<RawLiteratureMetadata>,
+      ),
+    ]);
+    if (page.status === 'rejected') throw page.reason;
+    if (count.status === 'rejected') {
+      if (call.ctx.signal.aborted) throw count.reason;
+      call.ctx.log.warning('Citation export total lookup failed; returning the page unchecked', {
+        page: params.page,
+        error: count.reason instanceof Error ? count.reason.message : String(count.reason),
+      });
+      return { entries: page.value, truncated: page.value.length === params.size };
+    }
+    const total = count.value.hits.total;
+    const offset = (params.page - 1) * params.size;
+    return {
+      entries: offset < total ? page.value : [],
+      total,
+      truncated: offset + params.size < total,
+    };
   }
 
   // ─── Authors ──────────────────────────────────────────────────────────────
@@ -590,24 +799,111 @@ export class InspireService {
     return { recid, name: hit?.metadata?.name?.value ?? '' };
   }
 
-  /** INSPIRE's citation summary for a literature query under the given facet filters. */
+  /**
+   * INSPIRE's citation summary for a literature query under the given facet
+   * filters, and its citations-by-year series. The series facet honors `doc_type`
+   * and `subject` but ignores `earliest_date` and `exclude-self-citations`, so with
+   * a year bound or the self-citation exclusion set it is not requested (`skipped`,
+   * naming those filters). Otherwise both facets are requested in parallel, since
+   * one request keeps only its first `facet_name`; the series runs under its own
+   * 15 s budget inside the call's. A failure of the summary fails the call and
+   * abandons the series. When the summary counts more than `BROAD_SERIES_RECORDS`
+   * matches, the series is abandoned `BROAD_SERIES_CUT_MS` after the requests
+   * started unless it has landed (`too_broad`). Any other failure of the series
+   * returns the summary with the series `failed`; only a cancelled call rethrows.
+   */
   async getCitationSummary(
     params: CitationSummaryParams,
     call: InspireCall,
-  ): Promise<CitationSummary> {
-    const body = await this.send(
-      '/literature/facets',
-      {
-        q: params.query,
-        facet_name: 'citation-summary',
-        ...facetParams(params),
-        ...(params.excludeSelfCitations ? { 'exclude-self-citations': true } : {}),
-      },
-      call,
-      'getCitationSummary',
-      parseCitationSummary,
-    );
-    return toCitationSummary(body);
+  ): Promise<CitationSummaryLookup> {
+    const summaryRequest = () =>
+      this.send(
+        '/literature/facets',
+        {
+          q: params.query,
+          facet_name: 'citation-summary',
+          ...facetParams(params),
+          ...(params.excludeSelfCitations ? { 'exclude-self-citations': true } : {}),
+        },
+        call,
+        'getCitationSummary',
+        parseCitationSummary,
+      );
+
+    const ignoredFilters = seriesIgnoredFilters(params);
+    if (ignoredFilters.length > 0) {
+      return {
+        summary: toCitationSummary(await summaryRequest()),
+        series: { status: 'skipped', ignoredFilters },
+      };
+    }
+
+    const started = Date.now();
+    const cut = new AbortController();
+    let cutTimer: ReturnType<typeof setTimeout> | undefined;
+    const seriesCall: InspireCall = {
+      ctx: call.ctx,
+      deadline: Math.min(call.deadline, started + CITATIONS_BY_YEAR_BUDGET_MS),
+      signal: cut.signal,
+    };
+    const [summary, series] = await Promise.allSettled([
+      summaryRequest().then(
+        (raw) => {
+          const read = toCitationSummary(raw);
+          if (read.matchedRecords > BROAD_SERIES_RECORDS) {
+            cutTimer = setTimeout(
+              () => cut.abort(),
+              Math.max(0, started + BROAD_SERIES_CUT_MS - Date.now()),
+            );
+          }
+          return read;
+        },
+        (error: unknown) => {
+          cut.abort();
+          throw error;
+        },
+      ),
+      // Time spent waiting at the gate comes out of the series' own budget.
+      this.seriesGate.run(
+        () =>
+          this.send(
+            '/literature/facets',
+            {
+              q: params.query,
+              facet_name: 'citations-by-year',
+              ...facetParams({ documentTypes: params.documentTypes, subjects: params.subjects }),
+            },
+            seriesCall,
+            'getCitationsByYear',
+            parseCitationsByYear,
+          ),
+        {
+          signal: AbortSignal.any([call.ctx.signal, cut.signal]),
+          maxWaitMs: Math.max(0, seriesCall.deadline - started),
+        },
+      ),
+    ]);
+    clearTimeout(cutTimer);
+    if (summary.status === 'rejected') throw summary.reason;
+    if (series.status === 'rejected') {
+      if (call.ctx.signal.aborted) throw series.reason;
+      if (cut.signal.aborted) {
+        call.ctx.log.info('Citations-by-year request cut: the query matches too many records', {
+          query: params.query,
+          matchedRecords: summary.value.matchedRecords,
+        });
+        return { summary: summary.value, series: { status: 'too_broad' } };
+      }
+      call.ctx.log.warning('Citations-by-year request failed; returning the summary without it', {
+        query: params.query,
+        error: series.reason instanceof Error ? series.reason.message : String(series.reason),
+      });
+      return { summary: summary.value, series: { status: 'failed' } };
+    }
+    return {
+      summary: summary.value,
+      series: { status: 'read', rows: toCitationsByYear(series.value) },
+    };
   }
 
   // ─── Experiments ──────────────────────────────────────────────────────────
@@ -661,17 +957,30 @@ export class InspireService {
 
   // ─── Transport ────────────────────────────────────────────────────────────
 
-  /**
-   * One INSPIRE request inside the call's budget: retry (outside) around the
-   * pacer (inside) around fetch + status mapping, with `parse` inside the retry
-   * so an unreadable body is retried like a failed fetch.
-   */
+  /** One INSPIRE request whose body `parse` reads; see {@link InspireService.request}. */
   private send<T>(
     path: InspirePath,
     params: InspireParams,
     call: InspireCall,
     operation: string,
     parse: (text: string) => T,
+  ): Promise<T> {
+    return this.request(path, params, call, operation, (response) => parse(response.text));
+  }
+
+  /**
+   * One INSPIRE request inside the call's budget: retry (outside) around the
+   * pacer (inside) around fetch + status mapping, with `read` inside the retry
+   * so an unreadable response is retried like a failed fetch. `exchange` sets the
+   * statuses returned to `read` and whether redirects are followed.
+   */
+  private request<T>(
+    path: InspirePath,
+    params: InspireParams,
+    call: InspireCall,
+    operation: string,
+    read: (response: BoundedResponse) => T,
+    exchange: ExchangeOptions = SEARCH_EXCHANGE,
   ): Promise<T> {
     const remainingMs = call.deadline - Date.now();
     if (remainingMs <= 0) {
@@ -685,22 +994,24 @@ export class InspireService {
       );
     }
     const url = buildUrl(path, params);
-    call.ctx.log.debug('INSPIRE request', { operation, path });
+    // The context binds its own `operation`, which would replace this one under the same key.
+    call.ctx.log.debug('INSPIRE request', { inspireOperation: operation, path });
     return withRetry(
       async (attempt) => {
         const response = await this.pacer.run(
-          (signal) => this.exchange(url, signal, call.deadline),
+          (signal) => this.exchange(url, signal, call.deadline, exchange),
           {
             signal: attempt.signal,
             maxWaitMs: attempt.remainingMs,
           },
         );
-        return parse(response.text);
+        return read(response);
       },
       {
         operation: `InspireService.${operation}`,
         context: call.ctx,
-        signal: call.ctx.signal,
+        // An abandoned request is a caller abort to withRetry: no retry, and the pacer frees its slot.
+        signal: call.signal ? AbortSignal.any([call.ctx.signal, call.signal]) : call.ctx.signal,
         deadlineMs: remainingMs,
         maxRetries: 2,
         baseDelayMs: 1_000,
@@ -713,12 +1024,14 @@ export class InspireService {
     url: string,
     signal: AbortSignal,
     deadline: number,
+    { accept, redirect }: ExchangeOptions,
   ): Promise<BoundedResponse> {
     const response = await fetchBounded(url, {
-      accept: [200, 400, 429],
+      accept,
       fetch: this.fetchImpl,
       headers: { 'User-Agent': this.userAgent },
       maxBytes: MAX_BYTES,
+      redirect,
       service: 'INSPIRE',
       signal,
       timeoutMs: Math.max(1, Math.min(ATTEMPT_TIMEOUT_MS, deadline - Date.now())),
@@ -765,7 +1078,7 @@ export function getInspireService(): InspireService {
   return _service;
 }
 
-/** Disposes the service's pacer; called from `createApp`'s `teardown()`. */
+/** Disposes the service's pacers; called from `createApp`'s `teardown()`. */
 export function disposeInspireService(): void {
   _service?.dispose();
   _service = undefined;

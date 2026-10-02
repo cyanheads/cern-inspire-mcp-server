@@ -21,24 +21,31 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   getPaperTool,
   type PaperDossierOutput,
+  paperDossierSchema,
 } from '@/mcp-server/tools/definitions/get-paper.tool.js';
+import type { RawDataMetadata } from '@/services/inspire/types.js';
 import { describeFailureClasses } from '../fixtures/failure-suite.js';
+import { MARKUP_AS_TEXT, MARKUP_FREE, PUBLISHER_MARKUP } from '../fixtures/inspire-markup.js';
 import {
   dataMetadata,
   dataPage,
   dossierMetadata,
   emptyBody,
   HIGGS,
+  hepdataDois,
   hit,
   htmlResponse,
   jsonResponse,
   literatureMetadata,
   literaturePage,
   MALDACENA,
+  mergedRecidResponse,
+  notFoundBody,
   omit,
   rateLimitResponse,
   searchBody,
   sparseLiteratureMetadata,
+  TWO_RECORD_PAPERS,
   TWO_VERSION_DOIS,
 } from '../fixtures/inspire-upstream.js';
 import {
@@ -95,6 +102,10 @@ const resolveRequest = () =>
   );
 const recordRequest = () => h.requests.find((r) => r.params.get('q')?.startsWith('recid:'));
 const dataRequest = () => h.requests.find((r) => r.path === '/api/data');
+
+/** INSPIRE's 404 for `GET /literature/<recid>`: the recid names no record, merged or not. */
+const routeMissing = (recid: string) =>
+  h.route(`/literature/${recid}`, jsonResponse(notFoundBody(), { status: 404 }));
 
 /** Scripts the one-shot resolve reply that an arXiv or DOI input consumes first. */
 const routeResolve = (body: unknown = literaturePage([literatureMetadata()])) =>
@@ -328,11 +339,11 @@ describe('max_authors and the author cap', () => {
     const out = structured<Dossier>(result);
     expect(out.authors).toHaveLength(500);
     expect(out).toMatchObject({ authorCount: 2_932, shown: 500, cap: 500, truncated: true });
-    expect(out.notice).toBe(
-      `Showing 500 of 2932 authors, the max_authors maximum; the other 2432 are not listed. To check whether someone is on this paper, call cern_inspire_search_literature with query "recid:${HIGGS.recid} and a <BAI or name>", which returns the paper when they are a listed author.`,
-    );
+    const notice = `Showing 500 of 2932 authors, the max_authors maximum; the other 2432 are not listed. To check whether someone is on this paper, call cern_inspire_search_literature with query "recid:${HIGGS.recid} and a BAI or NAME", which returns the paper when they are a listed author.`;
+    expect(out.notice).toBe(notice);
     expect(out.notice).not.toContain('raise max_authors');
-    expect(fullText(result)).toContain('the max_authors maximum; the other 2432 are not listed.');
+    expect(fullText(result)).toContain(notice);
+    expect(fullText(result)).not.toMatch(/<[A-Za-z]/);
   });
 
   it('reads a blank max_authors as the default 25', async () => {
@@ -441,7 +452,7 @@ describe('HEPData fields derived from INSPIRE', () => {
       recordDoi: '10.17182/hepdata.89456',
       latestVersion: 2,
       tableCount: 3,
-      hepdataUrl: `https://www.hepdata.net/record/ins${HIGGS.recid}`,
+      hepdataUrl: 'https://www.hepdata.net/record/89456',
     });
   });
 
@@ -502,7 +513,7 @@ describe('HEPData fields derived from INSPIRE', () => {
       status: 'available',
       inspireDataRecid: '1860001',
       recordDoi: '10.17182/hepdata.5',
-      hepdataUrl: `https://www.hepdata.net/record/ins${HIGGS.recid}`,
+      hepdataUrl: 'https://www.hepdata.net/record/5',
     });
   });
 
@@ -529,33 +540,58 @@ describe('HEPData fields derived from INSPIRE', () => {
     expect(text).not.toContain('**Record DOI:**');
   });
 
-  it('builds the record page URL from the paper recid, not from the data record link', async () => {
+  it('links the record page by the record number in the record DOI, not by any paper recid', async () => {
     routeRecord(dossierMetadata(1));
     routeData(dataPage([dataMetadata({ literature: [{ control_number: 999 }] })]));
 
     const out = structured<Dossier>(await run({ paper: HIGGS.recid }));
 
-    expect(out.hepdata.hepdataUrl).toBe(`https://www.hepdata.net/record/ins${HIGGS.recid}`);
+    expect(out.hepdata.hepdataUrl).toBe('https://www.hepdata.net/record/89456');
   });
 
-  it('builds the record page URL from the recid an arXiv ID resolved to', async () => {
+  it('falls back to the ins page of the paper when the record DOI is not a hepdata.<n> DOI', async () => {
+    const hepdata = await hepdataOf([{ value: '10.5072/other.1', material: 'data' }]);
+
+    expect(hepdata).toEqual({
+      status: 'available',
+      inspireDataRecid: '1860001',
+      recordDoi: '10.5072/other.1',
+      hepdataUrl: `https://www.hepdata.net/record/ins${HIGGS.recid}`,
+    });
+  });
+
+  it('falls back to the ins page of the recid an arXiv ID resolved to', async () => {
     routeResolve();
     routeRecord(dossierMetadata(1));
-    routeData();
+    routeData(dataPage([omit(dataMetadata(), 'dois')]));
 
     const out = structured<Dossier>(await run({ paper: HIGGS.arxiv }));
 
     expect(out.hepdata.hepdataUrl).toBe(`https://www.hepdata.net/record/ins${HIGGS.recid}`);
   });
 
-  it('asks the data collection for one record with only the DOI fields', async () => {
+  it('asks the data collection for up to 10 of the paper’s records with only the DOI fields, in one request', async () => {
     routeRecord(dossierMetadata(1));
     routeData();
 
     await run({ paper: HIGGS.recid });
 
-    expect(dataRequest()?.params.get('size')).toBe('1');
+    expect(h.requests.filter((r) => r.path === '/api/data')).toHaveLength(1);
+    expect(dataRequest()?.params.get('q')).toBe(`literature.control_number:${HIGGS.recid}`);
+    expect(dataRequest()?.params.get('size')).toBe('10');
     expect(dataRequest()?.params.get('fields')).toBe('control_number,dois.value,dois.material');
+  });
+
+  it('describes a single record without otherRecords or a HEPData notice', async () => {
+    routeRecord(dossierMetadata(1));
+    routeData();
+
+    const result = await run({ paper: HIGGS.recid });
+
+    const out = structured<Dossier>(result);
+    expect(out.hepdata).not.toHaveProperty('otherRecords');
+    expect(out).not.toHaveProperty('notice');
+    expect(bodyText(result)).not.toContain('**Other records');
   });
 
   it('renders the HEPData facts and the record page link into content[]', async () => {
@@ -569,7 +605,199 @@ describe('HEPData fields derived from INSPIRE', () => {
     expect(text).toContain(
       '**Record DOI:** 10.17182/hepdata.89456 · **Latest version:** 2 · **Tables:** 3 · **INSPIRE data recid:** 1860001',
     );
-    expect(text).toContain(`**Record page:** https://www.hepdata.net/record/ins${HIGGS.recid}`);
+    expect(text).toContain('**Record page:** https://www.hepdata.net/record/89456');
+  });
+});
+
+describe('papers with more than one HEPData record', () => {
+  /** get_paper for HIGGS over a `/data` page of `records`, INSPIRE's total defaulting to their count. */
+  const runWithData = async (
+    records: readonly RawDataMetadata[],
+    options: { authors?: number; total?: number } = {},
+  ) => {
+    routeRecord(dossierMetadata(options.authors ?? 1));
+    routeData(dataPage(records, { ...(options.total !== undefined && { total: options.total }) }));
+    return await run({ paper: HIGGS.recid });
+  };
+
+  it('describes the lowest-numbered of 1797621’s two records and lists the other in otherRecords', async () => {
+    const result = await runWithData(TWO_RECORD_PAPERS['1797621']);
+
+    expect(structured<Dossier>(result).hepdata).toEqual({
+      status: 'available',
+      inspireDataRecid: '2884928',
+      recordDoi: '10.17182/hepdata.98625',
+      latestVersion: 1,
+      tableCount: 9,
+      hepdataUrl: 'https://www.hepdata.net/record/98625',
+      otherRecords: [
+        {
+          inspireDataRecid: '2890786',
+          recordDoi: '10.17182/hepdata.156903',
+          latestVersion: 1,
+          tableCount: 1,
+          hepdataUrl: 'https://www.hepdata.net/record/156903',
+        },
+      ],
+    });
+  });
+
+  it('describes 153717 for 2844507 and lists 155498, whichever INSPIRE returned first', async () => {
+    const result = await runWithData(TWO_RECORD_PAPERS['2844507']);
+    const reversed = await runWithData([...TWO_RECORD_PAPERS['2844507']].reverse());
+
+    const { hepdata } = structured<Dossier>(result);
+    expect(hepdata).toMatchObject({
+      recordDoi: '10.17182/hepdata.153717',
+      inspireDataRecid: '2875618',
+      latestVersion: 2,
+      tableCount: 4,
+      hepdataUrl: 'https://www.hepdata.net/record/153717',
+    });
+    expect(hepdata.otherRecords).toEqual([
+      {
+        inspireDataRecid: '2875617',
+        recordDoi: '10.17182/hepdata.155498',
+        latestVersion: 1,
+        tableCount: 4,
+        hepdataUrl: 'https://www.hepdata.net/record/155498',
+      },
+    ]);
+    expect(structured<Dossier>(reversed).hepdata).toEqual(hepdata);
+  });
+
+  it('sets a notice naming the record hepdata describes and each other record', async () => {
+    const result = await runWithData(TWO_RECORD_PAPERS['1797621']);
+
+    const out = structured<Dossier>(result);
+    expect(out.notice).toBe(
+      'INSPIRE links 2 HEPData records to this paper: hepdata describes 10.17182/hepdata.98625, the lowest record number, and hepdata.otherRecords lists 10.17182/hepdata.156903.',
+    );
+    expect(out.truncated).toBe(false);
+    expect(fullText(result)).toContain('hepdata.otherRecords lists 10.17182/hepdata.156903');
+  });
+
+  it('lists each other record under HEPData with its DOI, version, tables, data recid, and record page', async () => {
+    const text = bodyText(await runWithData(TWO_RECORD_PAPERS['1797621']));
+
+    const lines = text.split('\n');
+    const start = lines.indexOf('### HEPData');
+    expect(lines.slice(start, start + 6)).toEqual([
+      '### HEPData',
+      '**Status:** available — HEPData holds numerical tables for this paper',
+      '**Record DOI:** 10.17182/hepdata.98625 · **Latest version:** 1 · **Tables:** 9 · **INSPIRE data recid:** 2884928',
+      '**Record page:** https://www.hepdata.net/record/98625',
+      '**Other records (1):**',
+      '- **Record DOI:** 10.17182/hepdata.156903 · **Latest version:** 1 · **Tables:** 1 · **INSPIRE data recid:** 2890786 · **Record page:** https://www.hepdata.net/record/156903',
+    ]);
+  });
+
+  it('renders every value of a two-record dossier into content[] and matches the output schema', async () => {
+    const result = await runWithData(TWO_RECORD_PAPERS['2844507']);
+
+    const out = structured<Dossier>(result);
+    expect(out).toEqual(expect.schemaMatching(getPaperTool.output));
+    const text = bodyText(result);
+    const { notice: _notice, truncated: _t, shown: _s, cap: _c, hepdata, ...dossier } = out;
+    for (const leaf of leaves(dossier)) expect(text).toContain(String(leaf));
+    for (const leaf of leaves(hepdata)) {
+      if (typeof leaf === 'string') expect(text).toContain(leaf);
+    }
+    // A bare 1, 2, or 4 occurs elsewhere in the text, so each record's numbers are read in its own line.
+    for (const record of [hepdata, ...(hepdata.otherRecords ?? [])]) {
+      expect(text).toContain(
+        `**Record DOI:** ${record.recordDoi} · **Latest version:** ${record.latestVersion} · **Tables:** ${record.tableCount} · **INSPIRE data recid:** ${record.inspireDataRecid}`,
+      );
+    }
+    expect(hepdata.latestVersion).not.toBe(hepdata.otherRecords?.[0]?.latestVersion);
+  });
+
+  it('states INSPIRE’s total and routes to search_hepdata when the paper has more records than one request returns', async () => {
+    const records = Array.from({ length: 10 }, (_, i) => ({
+      control_number: 3000000 + i,
+      dois: hepdataDois(200 - i, [1]),
+    }));
+
+    const result = await runWithData(records, { total: 12 });
+
+    const out = structured<Dossier>(result);
+    expect(out.hepdata.recordDoi).toBe('10.17182/hepdata.191');
+    expect(out.hepdata.otherRecords?.map((r) => r.recordDoi)).toEqual(
+      Array.from({ length: 9 }, (_, i) => `10.17182/hepdata.${192 + i}`),
+    );
+    expect(out.notice).toBe(
+      `INSPIRE links 12 HEPData records to this paper and 10 are shown: hepdata describes 10.17182/hepdata.191, the lowest record number shown, and hepdata.otherRecords lists the other 9; call cern_inspire_search_hepdata with query "literature.control_number:${HIGGS.recid}" to list all 12.`,
+    );
+    expect(bodyText(result)).toContain('**Other records (9):**');
+  });
+
+  it('states INSPIRE’s total when it exceeds the one record returned, with no other record to list', async () => {
+    const result = await runWithData([{ control_number: 3000001, dois: hepdataDois(5, [1]) }], {
+      total: 3,
+    });
+
+    const out = structured<Dossier>(result);
+    expect(out.hepdata).not.toHaveProperty('otherRecords');
+    expect(out.notice).toBe(
+      `INSPIRE links 3 HEPData records to this paper and 1 is shown: hepdata describes 10.17182/hepdata.5, the lowest record number shown; call cern_inspire_search_hepdata with query "literature.control_number:${HIGGS.recid}" to list all 3.`,
+    );
+    expect(fullText(result)).toContain(
+      'INSPIRE links 3 HEPData records to this paper and 1 is shown',
+    );
+  });
+
+  it('puts records whose DOI names no record number after the numbered ones, linked to the paper’s ins page', async () => {
+    const result = await runWithData([
+      { control_number: 3000001, dois: [{ value: '10.5072/other.1', material: 'data' }] },
+      { control_number: 3000002 },
+      { control_number: 3000003, dois: hepdataDois(77, [2]) },
+    ]);
+
+    const { hepdata } = structured<Dossier>(result);
+    expect(hepdata).toMatchObject({
+      inspireDataRecid: '3000003',
+      hepdataUrl: 'https://www.hepdata.net/record/77',
+    });
+    expect(hepdata.otherRecords).toEqual([
+      {
+        inspireDataRecid: '3000001',
+        recordDoi: '10.5072/other.1',
+        hepdataUrl: `https://www.hepdata.net/record/ins${HIGGS.recid}`,
+      },
+      {
+        inspireDataRecid: '3000002',
+        hepdataUrl: `https://www.hepdata.net/record/ins${HIGGS.recid}`,
+      },
+    ]);
+    expect(structured<Dossier>(result).notice).toBe(
+      'INSPIRE links 3 HEPData records to this paper: hepdata describes 10.17182/hepdata.77, the lowest record number, and hepdata.otherRecords lists 10.5072/other.1 and INSPIRE data recid 3000002.',
+    );
+  });
+
+  it('puts the author-cap notice first and the HEPData records notice after it', async () => {
+    const result = await runWithData(TWO_RECORD_PAPERS['1797621'], { authors: 30 });
+
+    const out = structured<Dossier>(result);
+    expect(out.truncated).toBe(true);
+    expect(out.notice).toBe(
+      'Showing 25 of 30 authors; raise max_authors (up to 500) to list more. INSPIRE links 2 HEPData records to this paper: hepdata describes 10.17182/hepdata.98625, the lowest record number, and hepdata.otherRecords lists 10.17182/hepdata.156903.',
+    );
+  });
+
+  it('escapes an upstream DOI in the notice and the list, and keeps it as received in structuredContent', async () => {
+    const forged = '10.17182/[x](http://evil.example.org)';
+    const result = await runWithData([
+      { control_number: 3000001, dois: hepdataDois(5, [1]) },
+      { control_number: 3000002, dois: [{ value: forged, material: 'data' }] },
+    ]);
+
+    const out = structured<Dossier>(result);
+    expect(out.hepdata.otherRecords?.[0]?.recordDoi).toBe(forged);
+    expect(out.notice).toContain('lists 10.17182/\\[x\\](http://evil.example.org).');
+    expect(bodyText(result)).toContain(
+      '- **Record DOI:** 10.17182/\\[x\\](http://evil.example.org) ·',
+    );
+    expect(fullText(result)).not.toContain('[x](http');
   });
 });
 
@@ -698,14 +926,20 @@ describe('paper_not_found', () => {
     return error;
   };
 
-  it('fails a recid whose record read comes back empty', async () => {
+  it('fails a recid whose record read comes back empty once INSPIRE answers 404 for it, after three requests', async () => {
     h.route('/literature', jsonResponse(emptyBody()));
     routeData(emptyBody());
+    routeMissing('99999999');
 
     const result = await run({ paper: '99999999' });
 
     const error = expectNotFound(result, '99999999');
     expect(error.message).toBe('No INSPIRE literature record matches "99999999".');
+    expect(h.requests.map((r) => r.path).sort()).toEqual([
+      '/api/data',
+      '/api/literature',
+      '/api/literature/99999999',
+    ]);
   });
 
   it('fails an arXiv ID that resolves to nothing after one request', async () => {
@@ -747,6 +981,60 @@ describe('paper_not_found', () => {
     expect(fullText(result)).not.toContain('1226331');
   });
 
+  it('fails a HEPData record DOI that no literature record carries, after one doi: request', async () => {
+    h.route('/literature', jsonResponse(emptyBody()));
+
+    const result = await run({ paper: 'doi:10.17182/hepdata.98625' });
+
+    const error = errorEnvelope(result);
+    expect(error.code).toBe(JsonRpcErrorCode.NotFound);
+    expect(error.data?.reason).toBe('paper_not_found');
+    expect(error.data?.paper).toBe('10.17182/hepdata.98625');
+    expect(h.requests).toHaveLength(1);
+    expect(resolveRequest()?.params.get('q')).toBe('doi:10.17182/hepdata.98625');
+  });
+
+  it.each([
+    ['10.17182/hepdata.98625', '98625'],
+    ['https://doi.org/10.17182/hepdata.98625.v1', '98625'],
+    ['10.17182/HEPDATA.156903.v1/t2', '156903'],
+    ['10.17182/hepdata.98625.', '98625'],
+    ['10.17182/hepdata.98625.v1;', '98625'],
+    ['10.17182/hepdata.0098625', '98625'],
+  ])(
+    'routes the unresolved HEPData DOI %j to its paper through cern_inspire_search_hepdata',
+    async (paper, number) => {
+      h.route('/literature', jsonResponse(emptyBody()));
+
+      const result = await run({ paper });
+
+      const error = errorEnvelope(result);
+      const doi = paper.replace('https://doi.org/', '');
+      const hint = `To reach its paper, call cern_inspire_search_hepdata with query dois.value:"10.17182/hepdata.${number}" and pass one of the record's paperRecids to cern_inspire_get_paper.`;
+      expect(error.code).toBe(JsonRpcErrorCode.NotFound);
+      expect(error.data?.reason).toBe('paper_not_found');
+      expect(error.message).toBe(
+        `No INSPIRE literature record carries "${doi}", a DOI of HEPData record ${number}, which names the data rather than a paper.`,
+      );
+      expect(error.data?.recovery?.hint).toBe(hint);
+      expect(fullText(result)).toContain(`Recovery: ${hint}`);
+      expect(fullText(result)).not.toContain(NOT_FOUND_HINT);
+    },
+  );
+
+  it('resolves a HEPData version DOI that a literature record carries as one of its DOIs', async () => {
+    routeResolve(
+      literaturePage([literatureMetadata({ dois: [{ value: '10.17182/hepdata.182472.v1' }] })]),
+    );
+    routeRecord();
+    routeData();
+
+    const result = await run({ paper: '10.17182/hepdata.182472.v1' });
+
+    expect(structured<Dossier>(result)).toMatchObject({ recid: HIGGS.recid, resolvedAs: 'doi' });
+    expect(resolveRequest()?.params.get('q')).toBe('doi:10.17182/hepdata.182472.v1');
+  });
+
   it('fails a record hit that carries no metadata', async () => {
     h.route('/literature', jsonResponse(searchBody([hit(undefined, HIGGS.recid)])));
     routeData();
@@ -757,6 +1045,7 @@ describe('paper_not_found', () => {
   it('reports not found even when the availability lookup failed as well', async () => {
     h.route('/literature', jsonResponse(emptyBody()));
     h.route('/data', new Response('down', { status: 503 }));
+    routeMissing('99999999');
 
     expectNotFound(await runSettled({ paper: '99999999' }), '99999999');
   });
@@ -767,11 +1056,23 @@ describe('paper_not_found', () => {
     const result = await run({ paper: '10.1000/a[1]<b>' });
 
     const error = expectNotFound(result, '10.1000/a[1]<b>');
-    expect(error.message).toBe('No INSPIRE literature record matches "10.1000/a\\[1\\]&lt;b&gt;".');
+    expect(error.message).toBe('No INSPIRE literature record matches "10.1000/a\\[1\\]&lt;b>".');
+  });
+
+  it('echoes the underscores and tildes of a DOI as written, so it can be sent again', async () => {
+    h.route('/literature', jsonResponse(emptyBody()));
+
+    const result = await run({ paper: '10.1000/x_(1)~2_' });
+
+    const error = expectNotFound(result, '10.1000/x_(1)~2_');
+    expect(error.message).toBe('No INSPIRE literature record matches "10.1000/x_(1)~2_".');
+    expect(fullText(result)).toContain('"10.1000/x_(1)~2_"');
   });
 
   it('attaches the contract reason through a direct handler call too', async () => {
     h.route('/literature', jsonResponse(emptyBody()));
+    routeData(emptyBody());
+    routeMissing('99999999');
     const ctx = createMockContext({ errors: getPaperTool.errors });
     const input = getPaperTool.input.parse({ paper: '99999999' });
 
@@ -820,6 +1121,76 @@ describe('paper_not_found', () => {
       severity: 'notice',
       recovery: NOT_FOUND_HINT,
     });
+  });
+});
+
+describe('a recid INSPIRE merged into another record', () => {
+  /** HEPData's ins2829718 names a recid INSPIRE merged into 1797621 (verified 2026-10-02). */
+  const MERGED = '2829718';
+  const SURVIVOR = '1797621';
+  const NOTICE = `INSPIRE merged recid ${MERGED} into recid ${SURVIVOR} and redirects the old recid here; cite and query this paper as recid:${SURVIVOR}.`;
+
+  /** The surviving record behind `recid:1797621`, zero hits for the merged recid, and INSPIRE's 301 between them. */
+  const routeMerged = (authors = 3) => {
+    h.route('/literature', (request) =>
+      jsonResponse(
+        new URL(request.url).searchParams.get('q') === `recid:${SURVIVOR}`
+          ? literaturePage([dossierMetadata(authors, { control_number: Number(SURVIVOR) })])
+          : emptyBody(),
+      ),
+    );
+    routeData();
+    h.route(`/literature/${MERGED}`, mergedRecidResponse(SURVIVOR));
+  };
+
+  it.each([
+    MERGED,
+    `ins${MERGED}`,
+    `https://www.hepdata.net/record/ins${MERGED}`,
+    `https://inspirehep.net/literature/${MERGED}`,
+  ])('serves the surviving record for %j and says so on both surfaces', async (paper) => {
+    routeMerged();
+
+    const result = await run({ paper });
+
+    const out = structured<Dossier>(result);
+    expect(out).toMatchObject({
+      recid: SURVIVOR,
+      mergedFrom: MERGED,
+      resolvedAs: 'recid',
+      notice: NOTICE,
+      inspireUrl: `https://inspirehep.net/literature/${SURVIVOR}`,
+    });
+    expect(bodyText(result)).toContain(
+      `**recid:** ${SURVIVOR} (resolved from recid ${MERGED}, which INSPIRE merged into this record)`,
+    );
+    expect(fullText(result)).toContain(NOTICE);
+    expect(h.requests).toHaveLength(5);
+    expect(h.requests.filter((r) => r.path === `/api/literature/${MERGED}`)).toHaveLength(1);
+  });
+
+  it('leads the notice with the merge, ahead of the author cap', async () => {
+    routeMerged(30);
+
+    const out = structured<Dossier>(await run({ paper: MERGED, max_authors: 5 }));
+
+    expect(out.truncated).toBe(true);
+    expect(out.notice).toBe(
+      `${NOTICE} Showing 5 of 30 authors; raise max_authors (up to 500) to list more.`,
+    );
+  });
+
+  it('prints no merge note for a recid INSPIRE serves directly', async () => {
+    routeRecord();
+    routeData();
+
+    const result = await run({ paper: HIGGS.recid });
+
+    const out = structured<Dossier>(result);
+    expect(out.mergedFrom).toBeUndefined();
+    expect(out.notice).toBeUndefined();
+    expect(bodyText(result)).toContain(`**recid:** ${HIGGS.recid} (resolved from recid) ·`);
+    expect(h.requests).toHaveLength(2);
   });
 });
 
@@ -1016,6 +1387,135 @@ describe('the dossier and format() parity', () => {
   });
 });
 
+describe('publisher markup in titles and abstracts', () => {
+  it('converts the title, every alternate title, and the abstract on both surfaces', async () => {
+    routeRecord(
+      dossierMetadata(1, {
+        titles: [
+          { title: PUBLISHER_MARKUP.deGruyter2830751Title },
+          { title: MARKUP_FREE.fiz2830751Title },
+          { title: PUBLISHER_MARKUP.aps1331113Title },
+        ],
+        abstracts: [{ source: 'APS', value: PUBLISHER_MARKUP.aps1768644Abstract }],
+      }),
+    );
+    routeData();
+
+    const result = await run({ paper: HIGGS.recid });
+
+    const out = structured<Dossier>(result);
+    expect(out).toEqual(expect.schemaMatching(getPaperTool.output));
+    expect(out).toMatchObject({
+      title: MARKUP_AS_TEXT.deGruyter2830751Title,
+      alternateTitles: [MARKUP_FREE.fiz2830751Title, MARKUP_AS_TEXT.aps1331113Title],
+      abstract: MARKUP_AS_TEXT.aps1768644Abstract,
+      abstractSource: 'APS',
+    });
+    const text = bodyText(result);
+    expect(text).toContain(
+      '## Non-binary quantum codes from constacyclic codes over 𝔽_q\\[u_1, u_2,…,u_k\\]/⟨u_i^3 = u_i, u_iu_j = u_ju_i⟩',
+    );
+    expect(text).toContain(
+      '**Alternate titles:** Non-binary quantum codes from constacyclic codes over Fq\\[u1,u2,…,uk\\]/⟨u3i=ui,uiuj=ujui⟩. / Erratum: High-spin spectroscopy of ^{144}Tb: Systematic investigation of dipole bands in N=79 isotones \\[Phys. Rev. C 89, 054309 (2014)\\]',
+    );
+    expect(text).toContain(
+      '### Abstract (source: APS)\n> The total cross section and differential cross sections for the production of B_c^± mesons',
+    );
+    expect(text).toContain('13\u{2009}\u{2009}GeV&lt;p_T(B_c^±)&lt;22\u{2009}\u{2009}GeV');
+    expect(text).toContain('|y|&lt;0.75 and 0.75&lt;|y|&lt;2.3');
+    expect(text).toContain(
+      '(0.34±0.04\\_{stat}\u{2009}\\_{-0.02}^{+0.06}\\_{sys}±0.01\\_{lifetime})%',
+    );
+    expect(text).not.toMatch(/&lt;\/?m[a-z]+|mathvariant|&amp;/);
+  });
+
+  it('passes over a markup-only arXiv abstract to the next one with text, labelled with its source', async () => {
+    routeRecord(
+      dossierMetadata(1, {
+        abstracts: [
+          { source: 'arXiv', value: '<p> </p><p><inline-graphic/></p>' },
+          { source: 'Elsevier', value: PUBLISHER_MARKUP.elsevier3200944Abstract },
+        ],
+      }),
+    );
+    routeData();
+
+    const result = await run({ paper: HIGGS.recid });
+
+    const out = structured<Dossier>(result);
+    expect(out.abstract).toBe(MARKUP_AS_TEXT.elsevier3200944Abstract);
+    expect(out.abstractSource).toBe('Elsevier');
+    const text = bodyText(result);
+    expect(text).toContain(
+      '### Abstract (source: Elsevier)\n> Recently it has been proposed that comparing the net-baryon (B) stopping',
+    );
+    expect(text).toContain(
+      'B/Q\u{202F}×\u{202F}Z/A\u{202F}&lt;\u{202F}1, while the model without the s−s\u{304} asymmetry',
+    );
+  });
+
+  it('prefers a clean abstract to one that still reads as markup after its one decode', async () => {
+    routeRecord(
+      dossierMetadata(1, {
+        abstracts: [
+          {
+            source: 'CERN',
+            value: '&lt;p&gt;One of the goals of ATLAS is the search for new physics.&lt;/p&gt;',
+          },
+          { value: 'One of the goals of ATLAS is the search for new physics.' },
+        ],
+      }),
+    );
+    routeData();
+
+    const result = await run({ paper: HIGGS.recid });
+
+    const out = structured<Dossier>(result);
+    expect(out.abstract).toBe('One of the goals of ATLAS is the search for new physics.');
+    expect(out).not.toHaveProperty('abstractSource');
+    const text = bodyText(result);
+    expect(text).toContain(
+      '### Abstract\n> One of the goals of ATLAS is the search for new physics.',
+    );
+    expect(text).not.toContain('&lt;p&gt;');
+  });
+
+  it('keeps an abstract that still reads as markup when no other has text, decoded once', async () => {
+    routeRecord(
+      dossierMetadata(1, {
+        abstracts: [
+          { source: 'CERN', value: '&lt;p&gt;Width &amp;sigma; measured.&lt;/p&gt;' },
+          { source: 'Other', value: '<p> </p>' },
+        ],
+      }),
+    );
+    routeData();
+
+    const result = await run({ paper: HIGGS.recid });
+
+    const out = structured<Dossier>(result);
+    expect(out.abstract).toBe('<p>Width &sigma; measured.</p>');
+    expect(out.abstractSource).toBe('CERN');
+    expect(bodyText(result)).toContain(
+      '### Abstract (source: CERN)\n> &lt;p&gt;Width &sigma; measured.&lt;/p&gt;',
+    );
+  });
+
+  it('renders a dossier whose only title is markup as untitled, with no alternate titles', async () => {
+    routeRecord(dossierMetadata(1, { titles: [{ title: '<i> </i>' }, { title: '<p></p>' }] }));
+    routeData();
+
+    const result = await run({ paper: HIGGS.recid });
+
+    const out = structured<Dossier>(result);
+    expect(out.title).toBe('');
+    expect(out.alternateTitles).toEqual([]);
+    const text = bodyText(result);
+    expect(text).toContain('## (untitled)');
+    expect(text).not.toContain('**Alternate titles:**');
+  });
+});
+
 describe('upstream text stays out of inline markdown slots', () => {
   /** Appends a line-start marker after a newline: if the newline survives, the marker leads a line. */
   let injected = 0;
@@ -1120,10 +1620,25 @@ describe('upstream text stays out of inline markdown slots', () => {
     expect(text).toContain(
       '## See \\[the paper\\](http://evil.example.org) &lt;img src=x onerror=1&gt;',
     );
-    expect(text).toContain('&lt;b&gt;bold&lt;/b&gt;');
+    expect(text).toContain('**Keywords:** &lt;b>bold&lt;/b>');
     expect(text).toContain('- https://example.org/a%5B1%5D%7Cb%20c — \\[link\\](x)');
     expect(text).not.toContain('<img');
-    expect(structured<Dossier>(result).urls[0]?.url).toBe('https://example.org/a[1]|b c');
+    const out = structured<Dossier>(result);
+    expect(out.urls[0]?.url).toBe('https://example.org/a[1]|b c');
+    // <img> is outside the markup vocabulary and keywords are never converted, so both reach format() with their angle brackets.
+    expect(out.title).toBe('See [the paper](http://evil.example.org) <img src=x onerror=1>');
+    expect(out.keywords).toEqual(['<b>bold</b>']);
+  });
+
+  it('prints keywords as written on both surfaces, so a keyword copies into a query unchanged', async () => {
+    const keywords = ['D*(2010)', 'p p --> t anti-t X', 'K*(892)', 'm_{T}', '_x_'];
+    routeRecord(dossierMetadata(1, { keywords: keywords.map((value) => ({ value })) }));
+    routeData();
+
+    const result = await run({ paper: HIGGS.recid });
+
+    expect(structured<Dossier>(result).keywords).toEqual(keywords);
+    expect(bodyText(result)).toContain(`**Keywords:** ${keywords.join('; ')}`);
   });
 
   it('keeps every line of a multi-line abstract inside the blockquote', async () => {
@@ -1207,6 +1722,63 @@ describe('upstream text stays out of inline markdown slots', () => {
     expect(text).toContain('## Higgs boson');
     expect(text).toContain('> A search.');
     expect(text).not.toMatch(/\p{Cf}/u);
+  });
+});
+
+describe('identifier values print as written', () => {
+  it('leaves *, _, and ~ in DOIs, report numbers, texkeys, BAIs, and record DOIs on both surfaces', async () => {
+    routeRecord(
+      dossierMetadata(1, {
+        authors: [
+          {
+            full_name: 'Doe, Jane',
+            ids: [
+              { schema: 'INSPIRE BAI', value: 'J.Doe_.1' },
+              { schema: 'ORCID', value: '0000-0002-1825-0097' },
+            ],
+          },
+        ],
+        author_count: 1,
+        arxiv_eprints: [{ value: '1207.7214', categories: ['hep-ex'] }],
+        dois: [{ value: '10.1234/a_(1)_' }],
+        report_numbers: [{ value: 'ATL-PHYS-PUB-2020-*' }],
+        texkeys: ['Doe:2020_x~'],
+      }),
+    );
+    routeData(
+      dataPage([
+        dataMetadata({ control_number: 11, dois: [{ value: '10.17182/_hep_', material: 'data' }] }),
+        dataMetadata({ control_number: 12, dois: [{ value: '10.5281/x*', material: 'data' }] }),
+      ]),
+    );
+
+    const result = await run({ paper: HIGGS.recid });
+
+    const out = structured<Dossier>(result);
+    expect(out.dois).toEqual(['10.1234/a_(1)_']);
+    expect(out.reportNumbers).toEqual(['ATL-PHYS-PUB-2020-*']);
+    expect(out.texkeys).toEqual(['Doe:2020_x~']);
+    expect(out.authors[0]?.bai).toBe('J.Doe_.1');
+    expect(out.notice).toBe(
+      'INSPIRE links 2 HEPData records to this paper: hepdata describes 10.17182/_hep_, the lowest record number, and hepdata.otherRecords lists 10.5281/x*.',
+    );
+    const text = bodyText(result);
+    expect(text).toContain(
+      '**arXiv:** 1207.7214 (hep-ex) · **DOIs:** 10.1234/a_(1)_ · **Report numbers:** ATL-PHYS-PUB-2020-*',
+    );
+    expect(text).toContain('(BAI J.Doe_.1 · ORCID 0000-0002-1825-0097)');
+    expect(text).toContain('**Texkeys:** Doe:2020_x~');
+    expect(text).toContain('**Record DOI:** 10.17182/_hep_');
+    expect(text).toContain('**Record DOI:** 10.5281/x*');
+  });
+});
+
+describe('next-step descriptions', () => {
+  it('points a linked experiment recid at cern_inspire_search_experiments', () => {
+    const description = paperDossierSchema.shape.experiments.element.shape.recid.description ?? '';
+
+    expect(description).toContain('INSPIRE experiment record ID');
+    expect(description).toContain('cern_inspire_search_experiments');
   });
 });
 

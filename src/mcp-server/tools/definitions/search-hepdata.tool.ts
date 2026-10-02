@@ -11,7 +11,7 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { blankAsUnset } from '@/mcp-server/tools/inputs.js';
 import { getInspireService } from '@/services/inspire/inspire-service.js';
-import { inline, printUrl, quote } from '@/utils/render.js';
+import { callerEcho, identifier, inline, printUrl, quote } from '@/utils/render.js';
 
 /** INSPIRE serves at most this many results of one query (`page × size`). */
 const RESULT_WINDOW = 10_000;
@@ -23,12 +23,14 @@ const hepdataRecordSchema = z
     inspireDataRecid: z
       .string()
       .describe("Record ID of the HEPData entry in INSPIRE's data collection."),
-    title: z.string().describe('Title of the HEPData submission (usually the paper title).'),
+    title: z
+      .string()
+      .describe(
+        'Title of the HEPData submission (usually the paper title) as text: publisher markup converted (scripts as _x or ^{xy}), LaTeX left as published.',
+      ),
     paperRecids: z
       .array(z.string().describe('INSPIRE literature record ID.'))
-      .describe(
-        'Literature records the data belongs to; pass to cern_inspire_get_paper. HEPData addresses the same paper as ins<recid>.',
-      ),
+      .describe('Literature records the data belongs to; pass to cern_inspire_get_paper.'),
     collaborations: z
       .array(z.string().describe('Collaboration name.'))
       .describe('Collaborations credited.'),
@@ -43,7 +45,9 @@ const hepdataRecordSchema = z
     abstractSnippet: z
       .string()
       .optional()
-      .describe('Start of the abstract, up to 300 characters at a word boundary.'),
+      .describe(
+        'Start of the first abstract with text, as text (numeric character references and 13 common named entities such as &lt; and &amp; decoded, other named entities left as written; publisher markup converted; LaTeX left as published), up to 300 characters at a word boundary.',
+      ),
     abstractTruncated: z
       .boolean()
       .optional()
@@ -52,13 +56,17 @@ const hepdataRecordSchema = z
     hepdataRecid: z
       .string()
       .optional()
-      .describe('HEPData record number, parsed from the record DOI.'),
+      .describe(
+        'HEPData record number, parsed from the record DOI: the N in hepdata.net/record/N. It is not an INSPIRE recid; pass one of paperRecids to cern_inspire_get_paper.',
+      ),
     latestVersion: z.number().optional().describe('Latest HEPData record version.'),
     tableCount: z.number().optional().describe('Number of tables in the latest version.'),
     hepdataUrl: z
       .string()
       .optional()
-      .describe('The HEPData record page on hepdata.net, where the table values are read.'),
+      .describe(
+        'The HEPData record page on hepdata.net, where the table values are read: keyed by hepdataRecid, or by the first of paperRecids (/record/ins followed by that recid) when the record DOI names no number.',
+      ),
     created: z.string().optional().describe('Date INSPIRE created the data record.'),
     citationCount: z.number().optional().describe('Citations INSPIRE counts for the data record.'),
   })
@@ -87,14 +95,14 @@ function renderRecord(r: HepdataRecordOutput, position: number): string[] {
   if (credits.length > 0) lines.push(credits.join(' · '));
 
   const hepdata = [
-    r.recordDoi && `**Record DOI:** ${inline(r.recordDoi)}`,
-    r.hepdataRecid && `**HEPData recid:** ${inline(r.hepdataRecid)}`,
+    r.recordDoi && `**Record DOI:** ${identifier(r.recordDoi)}`,
+    r.hepdataRecid && `**HEPData record number:** ${inline(r.hepdataRecid)}`,
     r.latestVersion !== undefined && `**Latest version:** ${r.latestVersion}`,
     r.tableCount !== undefined && `**Tables:** ${r.tableCount}`,
   ].filter(Boolean);
   if (hepdata.length > 0) lines.push(hepdata.join(' · '));
   if (r.hepdataUrl) lines.push(`**Record page:** ${printUrl(r.hepdataUrl)}`);
-  if (r.keywords.length > 0) lines.push(`**Keywords:** ${r.keywords.map(inline).join('; ')}`);
+  if (r.keywords.length > 0) lines.push(`**Keywords:** ${r.keywords.map(identifier).join('; ')}`);
   if (r.abstractSnippet) {
     lines.push(
       r.abstractTruncated ? '**Abstract** (truncated):' : '**Abstract:**',
@@ -158,7 +166,7 @@ export const searchHepdataTool = tool('cern_inspire_search_hepdata', {
       code: JsonRpcErrorCode.ValidationError,
       when: 'page × size exceeds the 10,000 results INSPIRE serves for one query.',
       recovery:
-        'Narrow the query with tighter terms, a collaborations.value:<name> clause, or an energy until it matches under 10,000 records, then page again with cern_inspire_search_hepdata.',
+        'Narrow the query with tighter terms, a collaborations.value:NAME clause, or an energy until it matches under 10,000 records, then page again with cern_inspire_search_hepdata.',
       severity: 'notice',
     },
     {
@@ -193,7 +201,7 @@ export const searchHepdataTool = tool('cern_inspire_search_hepdata', {
       code: JsonRpcErrorCode.ServiceUnavailable,
       when: 'The INSPIRE body exceeded the byte ceiling, was HTML where JSON was expected, or was invalid JSON.',
       recovery:
-        'Retry this call in a few seconds; if it fails again, retry cern_inspire_search_hepdata with a smaller size.',
+        'Retry this call in a few seconds; if it fails again, INSPIRE is likely serving an error page, so wait a minute before retrying cern_inspire_search_hepdata with the same page and size.',
       thrownBy: 'service',
     },
   ],
@@ -228,7 +236,7 @@ export const searchHepdataTool = tool('cern_inspire_search_hepdata', {
       notices.push(
         result.total > 0
           ? `Page ${input.page} is past the last page (${Math.ceil(result.total / input.size)}); request a lower page.`
-          : `No HEPData record matched "${inline(input.query)}". HEPData keywords use phrases like "Inclusive", "Differential Cross Section", and reactions like "P P --> TOP TOPBAR X"; try fewer words or a collaborations.value:<name> clause, or find the paper with cern_inspire_search_literature.`,
+          : `No HEPData record matched "${callerEcho(input.query)}". HEPData keywords use phrases like "Inclusive", "Differential Cross Section", and reactions like "P P --> TOP TOPBAR X"; try fewer words or a collaborations.value:NAME clause, or find the paper with cern_inspire_search_literature.`,
       );
     }
 

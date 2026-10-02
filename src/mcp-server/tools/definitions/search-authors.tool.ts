@@ -11,7 +11,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { authorQueryInput, blankAsUnset } from '@/mcp-server/tools/inputs.js';
 import type { AuthorMatch } from '@/services/inspire/identifiers.js';
 import { getInspireService } from '@/services/inspire/inspire-service.js';
-import { atLineStart, inline, printUrl } from '@/utils/render.js';
+import { atLineStart, callerEcho, identifier, inline, printUrl } from '@/utils/render.js';
 
 const MAX_LIMIT = 25;
 
@@ -27,7 +27,9 @@ const positionSchema = z
     institutionRecid: z
       .string()
       .optional()
-      .describe('INSPIRE institution record ID, when the position links one.'),
+      .describe(
+        "INSPIRE institution record ID, when the position links one; pass affid:N, N being this ID, as the query of cern_inspire_search_literature or cern_inspire_get_citation_summary for the institution's papers.",
+      ),
   })
   .describe('One position held.');
 
@@ -116,7 +118,7 @@ type PositionOutput = z.infer<typeof positionSchema>;
 
 /** The route-specific zero-hit fragment (design § search_authors). */
 const ZERO_HIT_HINTS: Record<AuthorMatch, string> = {
-  name: 'Try "Last, First", fewer name parts, or search papers with cern_inspire_search_literature using "a <name>".',
+  name: 'Try "Last, First", fewer name parts, or search papers with cern_inspire_search_literature using "a NAME".',
   bai: "BAIs are exact and case-sensitive, and usually spell out the first name (Jane.Doe.1); search by name to find the profile's BAI.",
   inspire_id: 'INSPIRE IDs are INSPIRE- plus 8 digits; search by name instead.',
   orcid: 'The profile may not have an ORCID linked; search by name instead.',
@@ -177,9 +179,9 @@ function renderAuthor(a: AuthorProfileOutput, position: number): string[] {
 
   const ids = [
     `**recid:** ${a.recid}`,
-    a.bai && `**BAI:** ${inline(a.bai)}`,
-    a.orcid && `**ORCID:** ${inline(a.orcid)}`,
-    a.inspireId && `**INSPIRE ID:** ${inline(a.inspireId)}`,
+    a.bai && `**BAI:** ${identifier(a.bai)}`,
+    a.orcid && `**ORCID:** ${identifier(a.orcid)}`,
+    a.inspireId && `**INSPIRE ID:** ${identifier(a.inspireId)}`,
   ].filter(Boolean);
   lines.push(ids.join(' · '));
 
@@ -214,7 +216,7 @@ function renderAuthor(a: AuthorProfileOutput, position: number): string[] {
   }
   if (a.otherIds.length > 0) {
     lines.push(
-      `**Other IDs:** ${a.otherIds.map((id) => `${inline(id.schema)} ${inline(id.value)}`).join('; ')}`,
+      `**Other IDs:** ${a.otherIds.map((id) => `${inline(id.schema)} ${identifier(id.value)}`).join('; ')}`,
     );
   }
   if (a.urls.length > 0) {
@@ -327,7 +329,7 @@ export const searchAuthorsTool = tool('cern_inspire_search_authors', {
       !carriesQueriedSurname(input.query, result.authors)
     ) {
       notices.push(
-        `No profile on this page has a surname in "${inline(input.query)}"; INSPIRE widened the match by reading name parts as initials, so these may be other people. Check the spelling, or search by BAI or ORCID.`,
+        `No profile on this page has a surname in "${callerEcho(input.query)}"; INSPIRE widened the match by reading name parts as initials, so these may be other people. Check the spelling, or search by BAI or ORCID.`,
       );
     }
     if (truncated) {
@@ -339,7 +341,7 @@ export const searchAuthorsTool = tool('cern_inspire_search_authors', {
     }
     if (result.total === 0) {
       notices.push(
-        `No INSPIRE author profile matched "${inline(input.query)}" as ${result.matchedAs}.`,
+        `No INSPIRE author profile matched "${callerEcho(input.query)}" as ${result.matchedAs}.`,
         ZERO_HIT_HINTS[result.matchedAs],
       );
     }

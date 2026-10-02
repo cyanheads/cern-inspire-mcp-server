@@ -27,16 +27,22 @@ import {
   authorMetadata,
   authorPage,
   badRequestBody,
+  CAPTURED_SERIES,
+  capturedResponse,
   citationSummaryBody,
   emptyBody,
+  type FacetReply,
+  facetResponder,
   hit,
   htmlResponse,
   jsonResponse,
   rateLimitResponse,
   searchBody,
   zeroCitationSummaryBody,
+  zeroCitationsByYearBody,
 } from '../fixtures/inspire-upstream.js';
 import {
+  hangingFetch,
   type ServiceHarness,
   settleWithFakeTimers,
   startHarness,
@@ -86,8 +92,11 @@ const runSettled = async (input: Input, options?: RunToolContractOptions) => {
   return outcome.value;
 };
 
-const routeSummary = (body: unknown = citationSummaryBody()) =>
-  h.route('/literature/facets', jsonResponse(body));
+/** Answers the summary facet with `body` and the series facet with `series` (the captured multi-decade author). */
+const routeSummary = (
+  body: object = citationSummaryBody(),
+  series: FacetReply = capturedResponse(CAPTURED_SERIES.multiDecadeAuthor),
+) => h.route('/literature/facets', facetResponder({ summary: body, series }));
 
 const routeAuthor = (body: unknown = authorPage()) => h.route('/authors', jsonResponse(body));
 
@@ -107,7 +116,11 @@ const lines = (result: ToolResult) => bodyText(result).split('\n');
 
 const requestsTo = (path: string) => h.requests.filter((r) => r.path === path);
 
-const facetParams = () => requestsTo('/api/literature/facets')[0]?.params;
+const facetRequests = (facet: 'citation-summary' | 'citations-by-year') =>
+  h.requests.filter((r) => r.params.get('facet_name') === facet);
+
+/** The summary request's parameters (the first, when a test makes more than one call). */
+const facetParams = () => facetRequests('citation-summary')[0]?.params;
 
 /** The first ten characters of each body line: the markdown structure, not the upstream words. */
 const shape = (result: ToolResult) => lines(result).map((line) => line.slice(0, 10));
@@ -122,10 +135,15 @@ describe('the author | query choice', () => {
     const result = await run({ query: 'collaboration:atlas' });
 
     expect(result.isError).toBeFalsy();
-    expect(h.requests).toHaveLength(1);
-    expect(h.requests[0]?.path).toBe('/api/literature/facets');
+    expect(h.requests.map((r) => r.path)).toEqual([
+      '/api/literature/facets',
+      '/api/literature/facets',
+    ]);
+    expect(h.requests.map((r) => r.params.get('facet_name')).sort()).toEqual([
+      'citation-summary',
+      'citations-by-year',
+    ]);
     expect(facetParams()?.get('q')).toBe('collaboration:atlas');
-    expect(facetParams()?.get('facet_name')).toBe('citation-summary');
     expect(structured<Output>(result).target).toEqual({
       kind: 'query',
       query: 'collaboration:atlas',
@@ -139,7 +157,11 @@ describe('the author | query choice', () => {
     const result = await run({ author: 'Jane.Doe.1' });
 
     expect(result.isError).toBeFalsy();
-    expect(h.requests.map((r) => r.path)).toEqual(['/api/authors', '/api/literature/facets']);
+    expect(h.requests.map((r) => r.path)).toEqual([
+      '/api/authors',
+      '/api/literature/facets',
+      '/api/literature/facets',
+    ]);
     const lookup = h.requests[0]?.params;
     expect(lookup?.get('q')).toBe('ids.value:Jane.Doe.1');
     expect(lookup?.get('fields')).toBe('control_number,name');
@@ -199,6 +221,13 @@ describe('the author | query choice', () => {
     expect((await run({ query: 'x'.repeat(1000) })).isError).toBeFalsy();
     const rejected = errorEnvelope(await run({ query: 'x'.repeat(1001) }));
     expect(rejected.code).toBe(JsonRpcErrorCode.InvalidParams);
+  });
+
+  it('gives an institution example for query: affid with an institution recid', () => {
+    const description = getCitationSummaryTool.input.shape.query.description ?? '';
+
+    expect(description).toContain('"affid:902725"');
+    expect(description).toContain('institution');
   });
 });
 
@@ -359,14 +388,30 @@ describe('author_not_identifier', () => {
     expect(h.requests).toHaveLength(0);
   });
 
-  it('echoes the author through inline() in the message and keeps it verbatim in data', async () => {
+  it('echoes the author through callerEcho() in the message and keeps it verbatim in data', async () => {
     const author = 'Doe\r\n# injected\n[x](http://evil) <b>';
 
     const error = errorEnvelope(await run({ author }));
 
     expect(error.message).not.toMatch(/[\r\n]/);
-    expect(error.message).toContain('Doe # injected \\[x\\](http://evil) &lt;b&gt;');
+    expect(error.message).toContain('Doe # injected \\[x\\](http://evil) &lt;b>');
     expect(error.data?.author).toBe(author);
+  });
+
+  it('echoes a wildcard name as written in the message on both surfaces', async () => {
+    const result = await run({ author: 'Ellis*' });
+
+    expect(errorEnvelope(result).message).toBe(
+      'author "Ellis*" is not a BAI, ORCID, INSPIRE ID, or author recid.',
+    );
+    expect(fullText(result)).toContain('author "Ellis*" is not a BAI');
+  });
+
+  it('still escapes a link-shaped name in the content[] message', async () => {
+    const result = await run({ author: '[x](javascript:alert(1))' });
+
+    expect(fullText(result)).toContain('author "\\[x\\](javascript:alert(1))" is not a BAI');
+    expect(fullText(result)).not.toContain('[x](');
   });
 });
 
@@ -447,12 +492,15 @@ describe('invalid_year_range', () => {
 });
 
 describe('filters on the wire', () => {
-  it('sends only q and facet_name when no filter is set', async () => {
+  it('sends only q and facet_name on both facet requests when no filter is set', async () => {
     routeSummary();
 
     const result = await run({ query: 'collaboration:atlas' });
 
-    expect([...(h.requests[0]?.names ?? [])].sort()).toEqual(['facet_name', 'q']);
+    expect(h.requests).toHaveLength(2);
+    for (const request of h.requests) {
+      expect([...request.names].sort()).toEqual(['facet_name', 'q']);
+    }
     expect(structured<Output>(result).appliedFilters).toBe('none');
   });
 
@@ -469,8 +517,12 @@ describe('filters on the wire', () => {
     } as Input);
 
     expect(result.isError).toBeFalsy();
-    expect([...(h.requests[0]?.names ?? [])].sort()).toEqual(['facet_name', 'q']);
+    expect(h.requests).toHaveLength(2);
+    for (const request of h.requests) {
+      expect([...request.names].sort()).toEqual(['facet_name', 'q']);
+    }
     expect(structured<Output>(result).appliedFilters).toBe('none');
+    expect(structured<Output>(result).citationsByYear).toHaveLength(71);
   });
 
   it('reads empty arrays for the facet filters as unset', async () => {
@@ -478,8 +530,11 @@ describe('filters on the wire', () => {
 
     await run({ query: 'x', document_types: [], subjects: [] });
 
-    expect(h.requests[0]?.names).not.toContain('doc_type');
-    expect(h.requests[0]?.names).not.toContain('subject');
+    expect(h.requests).toHaveLength(2);
+    for (const request of h.requests) {
+      expect(request.names).not.toContain('doc_type');
+      expect(request.names).not.toContain('subject');
+    }
   });
 
   it('maps document types, subjects, and years to the facet parameters, and echoes them', async () => {
@@ -520,10 +575,31 @@ describe('filters on the wire', () => {
     const off = await run({ query: 'x', exclude_self_citations: false });
     const on = await run({ query: 'x', exclude_self_citations: true });
 
-    expect(h.requests[0]?.names).not.toContain('exclude-self-citations');
-    expect(h.requests[1]?.params.get('exclude-self-citations')).toBe('true');
+    const [offSummary, onSummary] = facetRequests('citation-summary');
+    expect(offSummary?.names).not.toContain('exclude-self-citations');
+    expect(onSummary?.params.get('exclude-self-citations')).toBe('true');
+    expect(h.requests.every((r) => r.params.get('exclude-self-citations') !== 'false')).toBe(true);
     expect(structured<Output>(off).appliedFilters).toBe('none');
     expect(structured<Output>(on).appliedFilters).toBe('exclude_self_citations=true');
+  });
+
+  it.each<[string, Partial<Input>]>([
+    ['year_from', { year_from: 2012 }],
+    ['year_to', { year_to: 1990 }],
+    ['exclude_self_citations', { exclude_self_citations: true }],
+  ])('sends exactly one facet request, the summary, when %s is set', async (_label, filter) => {
+    routeSummary();
+
+    const result = await run({
+      query: 'collaboration:atlas',
+      document_types: 'published',
+      ...filter,
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(h.requests).toHaveLength(1);
+    expect(h.requests[0]?.path).toBe('/api/literature/facets');
+    expect(h.requests[0]?.params.getAll('facet_name')).toEqual(['citation-summary']);
   });
 
   it('applies the same filters to the summary of an author target', async () => {
@@ -596,17 +672,17 @@ describe('required enrichment', () => {
   it('writes every required field on a populated summary and sets no notice', async () => {
     routeSummary();
 
-    const result = await run({ query: 'collaboration:atlas', year_from: 2012 });
+    const result = await run({ query: 'collaboration:atlas', document_types: 'published' });
 
     const out = structured<Output>(result);
     expect(out).toMatchObject({
       effectiveQuery: 'collaboration:atlas',
-      appliedFilters: 'years=2012–',
+      appliedFilters: 'document_types=published',
       matchedRecords: 455,
       citeablePapers: 413,
     });
     expect(out.notice).toBeUndefined();
-    expect(fullText(result)).toContain('**Applied filters:** years=2012–');
+    expect(fullText(result)).toContain('**Applied filters:** document_types=published');
   });
 });
 
@@ -615,10 +691,10 @@ describe('zero-summary notices', () => {
     'No citeable papers matched; the summary is all zeros. Check the query with cern_inspire_search_literature first.';
   const ORCID_HINT = 'Literature queries do not match ORCIDs; pass the ORCID as author instead.';
 
-  const notice = async (input: Input, body: unknown = zeroCitationSummaryBody()) => {
+  const notice = async (input: Input, body: object = zeroCitationSummaryBody()) => {
     h = startHarness();
     routeAuthor();
-    routeSummary(body);
+    routeSummary(body, zeroCitationsByYearBody());
     return structured<Output>(await run(input)).notice;
   };
 
@@ -673,7 +749,17 @@ describe('the summary and format() parity', () => {
     const out = structured<Output>(result);
     expect(out).toEqual(expect.schemaMatching(getCitationSummaryTool.output));
     const text = bodyText(result);
-    const { target, matchedRecords, citeablePapers, hIndex, all, published, buckets } = out;
+    const {
+      target,
+      matchedRecords,
+      citeablePapers,
+      hIndex,
+      all,
+      published,
+      buckets,
+      citationsByYear,
+    } = out;
+    expect(citationsByYear).toHaveLength(71);
     for (const leaf of leaves({
       target,
       matchedRecords,
@@ -682,6 +768,7 @@ describe('the summary and format() parity', () => {
       all,
       published,
       buckets,
+      citationsByYear,
     })) {
       expect(text).toContain(String(leaf));
     }
@@ -884,6 +971,364 @@ describe('the summary and format() parity', () => {
   });
 });
 
+describe('citations per year', () => {
+  const ZERO =
+    'No citeable papers matched; the summary is all zeros. Check the query with cern_inspire_search_literature first.';
+  const FAILED =
+    'Citations per year could not be read from INSPIRE this time; every other figure is complete. Retry this call for them.';
+  const skipped = (list: string) =>
+    `Citations per year are not included: INSPIRE's per-year series ignores ${list}, so it would not match the filtered figures. Call again without ${list} for citations per year (all years, self-citations included).`;
+  const CAPTION =
+    "**Citations per year** — by the citing record's earliest date, self-citations included, over every matched record (citeable or not):";
+
+  /** The `| Year | Citations |` rows `format()` rendered, as numbers. */
+  const tableRows = (result: ToolResult) =>
+    lines(result).flatMap((line) => {
+      const match = /^\| (\d{4}) \| (\d+) \|$/.exec(line);
+      return match ? [{ year: Number(match[1]), citations: Number(match[2]) }] : [];
+    });
+
+  it('says in the description that any of the three filters leaves the series out, and names the broad-query case on the field', () => {
+    expect(getCitationSummaryTool.description).toContain(
+      'year_from and year_to narrow the summary to papers from those years, and exclude_self_citations recounts it without self-citations; any of them leaves out citations per year,',
+    );
+    expect(getCitationSummaryTool.output.shape.citationsByYear.description).toContain(
+      'or when the query matches more than about 150,000 records',
+    );
+    expect(getCitationSummaryTool.output.shape.citationsByYear.description).toContain(
+      'unless INSPIRE answers within about 2 s (a series it has cached)',
+    );
+  });
+
+  it('returns the series ascending in structuredContent and the same rows as a table in content[]', async () => {
+    routeAuthor();
+    routeSummary();
+
+    const result = await run({ author: 'Jane.Doe.1' });
+
+    const out = structured<Output>(result);
+    expect(out.citationsByYear).toHaveLength(71);
+    expect(out.citationsByYear?.[0]).toEqual({ year: 1956, citations: 2 });
+    expect(out.citationsByYear?.at(-1)).toEqual({ year: 2026, citations: 2975 });
+    expect(out.citationsByYear?.map((r) => r.year)).toEqual(
+      Array.from({ length: 71 }, (_, i) => 1956 + i),
+    );
+    expect(out.citationsByYear?.reduce((sum, r) => sum + r.citations, 0)).toBe(108_219);
+    expect(tableRows(result)).toEqual(out.citationsByYear);
+    expect(bodyText(result)).toContain(
+      [CAPTION, '', '| Year | Citations |', '|:--|--:|', '| 1956 | 2 |', '| 1957 | 1 |'].join('\n'),
+    );
+    expect(out).toEqual(expect.schemaMatching(getCitationSummaryTool.output));
+  });
+
+  it('renders the year table after the citation-bucket table', async () => {
+    routeSummary();
+
+    const text = bodyText(await run({ query: 'x' }));
+
+    const buckets = text.indexOf('| Citation range |');
+    const years = text.indexOf('| Year | Citations |');
+    expect(buckets).toBeGreaterThan(0);
+    expect(years).toBeGreaterThan(buckets);
+    expect(text.trimEnd().endsWith('| 2026 | 2975 |')).toBe(true);
+  });
+
+  it('renders the year table after the totals when INSPIRE sends no buckets', async () => {
+    routeSummary(
+      summary((aggregation) => {
+        aggregation.citations = {};
+      }),
+    );
+
+    const text = bodyText(await run({ query: 'x' }));
+
+    expect(text).not.toContain('Citation range');
+    expect(text.indexOf('| Year | Citations |')).toBeGreaterThan(text.indexOf('| Published |'));
+  });
+
+  it('keeps a gapped series gapped on both surfaces, with no zero row invented', async () => {
+    routeSummary(citationSummaryBody(), capturedResponse(CAPTURED_SERIES.gapped));
+
+    const result = await run({ query: 'collaboration:atlas' });
+
+    const rows = structured<Output>(result).citationsByYear ?? [];
+    expect(rows).toHaveLength(36);
+    expect(rows.slice(0, 3).map((r) => r.year)).toEqual([1964, 1977, 1993]);
+    expect(rows.every((r) => r.citations > 0)).toBe(true);
+    expect(tableRows(result)).toEqual(rows);
+    expect(bodyText(result)).not.toMatch(/^\| 19(6[5-9]|7[0-6]|7[89]|8\d|9[0-2]) \|/m);
+  });
+
+  it('sums the series of one paper to its citation count, 2025 included', async () => {
+    routeSummary(citationSummaryBody(), capturedResponse(CAPTURED_SERIES.paper));
+
+    const result = await run({ query: 'recid:451647' });
+
+    const rows = structured<Output>(result).citationsByYear ?? [];
+    expect(rows.reduce((sum, r) => sum + r.citations, 0)).toBe(22_635);
+    expect(rows.find((r) => r.year === 2025)?.citations).toBe(1227);
+    expect(bodyText(result)).toContain('| 2025 | 1227 |');
+  });
+
+  it('asks for the summary and the series on the same query, and resolves an author once', async () => {
+    routeAuthor();
+    routeSummary();
+
+    await run({ author: 'Jane.Doe.1' });
+
+    expect(h.requests.map((r) => r.path).sort()).toEqual([
+      '/api/authors',
+      '/api/literature/facets',
+      '/api/literature/facets',
+    ]);
+    const [series] = facetRequests('citations-by-year');
+    expect(series?.params.get('q')).toBe('authors.recid:1000001');
+    expect([...(series?.names ?? [])].sort()).toEqual(['facet_name', 'q']);
+    expect(facetRequests('citation-summary')).toHaveLength(1);
+  });
+
+  it('sends document_types and subjects on the series request too', async () => {
+    routeSummary();
+
+    const result = await run({
+      query: 'x',
+      document_types: 'published,review',
+      subjects: 'theory-hep',
+    });
+
+    const [series] = facetRequests('citations-by-year');
+    expect(series?.params.getAll('doc_type')).toEqual(['published', 'review']);
+    expect(series?.params.getAll('subject')).toEqual(['Theory-HEP']);
+    expect(series?.names).not.toContain('earliest_date');
+    expect(structured<Output>(result).citationsByYear).toHaveLength(71);
+  });
+
+  it.each<[string, Partial<Input>, string]>([
+    ['year_from', { year_from: 2010 }, 'year_from'],
+    ['year_to', { year_to: 1990 }, 'year_to'],
+    ['exclude_self_citations', { exclude_self_citations: true }, 'exclude_self_citations'],
+    ['both years', { year_from: 2000, year_to: 2010 }, 'year_from and year_to'],
+    [
+      'every one of them beside a subject',
+      { year_from: 2000, year_to: 2010, exclude_self_citations: true, subjects: 'Lattice' },
+      'year_from, year_to, and exclude_self_citations',
+    ],
+  ])('omits the series and names the filter when %s is set', async (_label, filters, list) => {
+    routeSummary();
+
+    const result = await run({ query: 'collaboration:atlas', ...filters });
+
+    const out = structured<Output>(result);
+    expect(out).not.toHaveProperty('citationsByYear');
+    expect(out.notice).toBe(skipped(list));
+    expect(fullText(result)).toContain(skipped(list));
+    expect(bodyText(result)).not.toContain('Citations per year');
+    expect(facetRequests('citations-by-year')).toHaveLength(0);
+    expect(h.requests).toHaveLength(1);
+  });
+
+  it('puts the omitted-series notice after the all-zeros notice when both apply', async () => {
+    routeSummary(zeroCitationSummaryBody());
+
+    const out = structured<Output>(await run({ query: 'zzzz', year_from: 2030 }));
+
+    expect(out.notice).toBe(`${ZERO} ${skipped('year_from')}`);
+  });
+
+  it('returns an empty series for zero matches, with the all-zeros notice unchanged', async () => {
+    routeSummary(zeroCitationSummaryBody(), zeroCitationsByYearBody());
+
+    const result = await run({ query: 'zzzz nothing' });
+
+    const out = structured<Output>(result);
+    expect(out.citationsByYear).toEqual([]);
+    expect(out.notice).toBe(ZERO);
+    expect(bodyText(result)).toContain('**Citations per year:** none recorded');
+    expect(bodyText(result)).not.toContain('| Year | Citations |');
+  });
+
+  it.each<[string, () => Response]>([
+    ['a persistent 429', () => rateLimitResponse('1')],
+    ['an HTML page', () => htmlResponse()],
+    ['a persistent 500', () => new Response('upstream trouble', { status: 500 })],
+    ['JSON without the citations_by_year aggregation', () => jsonResponse({ aggregations: {} })],
+  ])(
+    'returns the summary without the series, and a retry notice, when the series request answers %s',
+    async (_label, reply) => {
+      routeSummary(citationSummaryBody(), reply);
+
+      const result = await runSettled({ query: 'collaboration:atlas' });
+
+      const out = structured<Output>(result);
+      expect(out).not.toHaveProperty('citationsByYear');
+      expect(out.citeablePapers).toBe(413);
+      expect(out.notice).toBe(FAILED);
+      expect(fullText(result)).toContain(FAILED);
+      expect(bodyText(result)).not.toContain('Citations per year');
+    },
+  );
+
+  it('returns the summary when INSPIRE never answers the series, inside the call budget', async () => {
+    const fake = facetResponder();
+    const hang = hangingFetch();
+    h = startHarness({
+      fetch: async (input, init) => {
+        const url = new URL(input instanceof Request ? input.url : String(input));
+        if (url.searchParams.get('facet_name') === 'citations-by-year') return hang(input, init);
+        return fake(new Request(url));
+      },
+    });
+
+    const result = await runSettled({ query: 'collaboration:atlas' });
+
+    const out = structured<Output>(result);
+    expect(out).not.toHaveProperty('citationsByYear');
+    expect(out.notice).toBe(FAILED);
+    expect(facetRequests('citations-by-year')).toHaveLength(1);
+  });
+
+  /** The summary body with INSPIRE's match count set to `matched`. */
+  const matching = (matched: number) =>
+    summary((_aggregation, whole) => {
+      whole.hits = { total: { value: matched } };
+    });
+
+  /** Answers the summary facet with `body` and leaves the series facet unanswered until aborted. */
+  const hangSeries = (body: object) => {
+    const fake = facetResponder({ summary: body });
+    const hang = hangingFetch();
+    h = startHarness({
+      fetch: async (input, init) => {
+        const url = new URL(input instanceof Request ? input.url : String(input));
+        if (url.searchParams.get('facet_name') === 'citations-by-year') return hang(input, init);
+        return fake(new Request(url));
+      },
+    });
+  };
+
+  const tooBroad = (matched: string) =>
+    `Citations per year are not included: this query matches ${matched} records, and past about 150,000 INSPIRE takes longer than 15 s to count them. Repeat this call in about 30 s, since INSPIRE may finish the count meanwhile and answer from its cache, or narrow the query text, document_types, or subjects (year_from and year_to leave citations per year out).`;
+
+  it('leaves out the series of a query past 150,000 records with a notice to repeat or narrow, on both surfaces', async () => {
+    hangSeries(matching(216_736));
+
+    const result = await runSettled({ query: 'date > 2023' });
+
+    const out = structured<Output>(result);
+    expect(out).not.toHaveProperty('citationsByYear');
+    expect(out.matchedRecords).toBe(216_736);
+    expect(out.citeablePapers).toBe(413);
+    expect(out.notice).toBe(tooBroad('216,736'));
+    expect(fullText(result)).toContain(`> ${tooBroad('216,736')}`);
+    expect(bodyText(result)).not.toContain('Citations per year');
+    expect(out.notice).not.toMatch(/year_from and year_to (narrow|to)/);
+    expect(facetRequests('citations-by-year')).toHaveLength(1);
+    expect(out).toEqual(expect.schemaMatching(getCitationSummaryTool.output));
+  });
+
+  /** The notice past 300,000 records, where INSPIRE was not seen to finish or cache the count. */
+  const narrowOnly = (matched: string) =>
+    `Citations per year are not included: this query matches ${matched} records, and past about 150,000 INSPIRE takes longer than 15 s to count them. Narrow the query text, document_types, or subjects for them (year_from and year_to leave citations per year out).`;
+
+  it.each<[number, string, string]>([
+    [300_000, '300,000', tooBroad('300,000')],
+    [300_001, '300,001', narrowOnly('300,001')],
+    [644_458, '644,458', narrowOnly('644,458')],
+  ])(
+    'at %i matched records, offers the repeat only up to 300,000, on both surfaces',
+    async (matched, shown, notice) => {
+      hangSeries(matching(matched));
+
+      const result = await runSettled({ query: 'date > 2015' });
+
+      const out = structured<Output>(result);
+      expect(out.notice).toBe(notice);
+      expect(fullText(result)).toContain(`> ${notice}`);
+      expect(out.notice).toContain(`matches ${shown} records`);
+      expect(out).not.toHaveProperty('citationsByYear');
+    },
+  );
+
+  it('tells a caller past 300,000 records only to narrow, never to repeat the call', async () => {
+    hangSeries(matching(1_278_435));
+
+    const result = await runSettled({ query: 'date > 2000' });
+
+    expect(structured<Output>(result).notice).not.toMatch(/repeat|30 s|cache/i);
+    expect(fullText(result)).not.toMatch(/repeat|30 s|cache/i);
+    expect(fullText(result)).toContain('Narrow the query text, document_types, or subjects');
+  });
+
+  it.each<[number, string]>([
+    [149_999, FAILED],
+    [150_000, FAILED],
+    [150_001, tooBroad('150,001')],
+  ])(
+    'with the series unanswered at %i matched records, gives the notice for that side of 150,000',
+    async (matched, notice) => {
+      hangSeries(matching(matched));
+
+      const out = structured<Output>(await runSettled({ query: 'date > 2023' }));
+
+      expect(out.notice).toBe(notice);
+      expect(out).not.toHaveProperty('citationsByYear');
+    },
+  );
+
+  it('gives a broad query’s series that fails outright only the retry notice', async () => {
+    routeSummary(matching(644_458), jsonResponse(badRequestBody('Bad facet.'), { status: 400 }));
+
+    const out = structured<Output>(await runSettled({ query: 'date > 2015' }));
+
+    expect(out.notice).toBe(FAILED);
+  });
+
+  it('puts the failed-series notice after the all-zeros notice when both apply', async () => {
+    routeSummary(zeroCitationSummaryBody(), () => htmlResponse());
+
+    const out = structured<Output>(await runSettled({ query: 'zzzz' }));
+
+    expect(out.notice).toBe(`${ZERO} ${FAILED}`);
+  });
+
+  it('returns the summary without the series, and a retry notice, when INSPIRE rejects only the series request with a 400', async () => {
+    routeSummary(
+      citationSummaryBody(),
+      jsonResponse(badRequestBody('Bad facet.'), { status: 400 }),
+    );
+
+    const result = await run({ query: 'x' });
+
+    expect(result.isError).toBeFalsy();
+    const out = structured<Output>(result);
+    expect(out).not.toHaveProperty('citationsByYear');
+    expect(out.hIndex).toEqual({ all: 197, published: 184 });
+    expect(out.notice).toBe(FAILED);
+    expect(fullText(result)).toContain(`> ${FAILED}`);
+    expect(bodyText(result)).toContain('**h-index:** 197 (all citeable) · 184 (published)');
+  });
+
+  it('fails a call cancelled while the series is in flight, never a degraded success', async () => {
+    const controller = new AbortController();
+    const fake = facetResponder();
+    const hang = hangingFetch();
+    h = startHarness({
+      fetch: async (input, init) => {
+        const url = new URL(input instanceof Request ? input.url : String(input));
+        if (url.searchParams.get('facet_name') !== 'citations-by-year')
+          return fake(new Request(url));
+        setTimeout(() => controller.abort(), 20);
+        return await hang(input, init);
+      },
+    });
+
+    const result = await run({ query: 'x' }, { context: { signal: controller.signal } });
+
+    expect(controller.signal.aborted).toBe(true);
+    expect(errorEnvelope(result).code).toBe(JsonRpcErrorCode.RequestCancelled);
+  });
+});
+
 describe('upstream text stays out of inline markdown slots', () => {
   const NEL = String.fromCharCode(0x85);
   const LS = String.fromCharCode(0x2028);
@@ -902,7 +1347,7 @@ describe('upstream text stays out of inline markdown slots', () => {
 
     expect(shape(hostile)).toEqual(shape(benign));
     expect(lines(hostile).filter((line) => line.startsWith('#'))).toEqual([
-      '## INSPIRE citation summary — Doe, Jane # Injected heading **Matched records:** 999999 (author recid 1000001)',
+      '## INSPIRE citation summary — Doe, Jane # Injected heading \\*\\*Matched records:\\*\\* 999999 (author recid 1000001)',
     ]);
     expect(lines(hostile).filter((line) => line.startsWith('**Matched records:**'))).toHaveLength(
       1,
@@ -933,7 +1378,7 @@ describe('upstream text stays out of inline markdown slots', () => {
 
     expect(lines(result).some((line) => line.startsWith('# injected'))).toBe(false);
     expect(bodyText(result)).toContain(
-      '**Query:** collaboration:atlas # injected \\[x\\](http://evil) &lt;b&gt;',
+      '**Query:** collaboration:atlas # injected \\[x\\](http://evil) &lt;b>',
     );
     expect(structured<Output>(result).target.query).toBe(
       'collaboration:atlas\r\n# injected\n[x](http://evil) <b>',
@@ -970,22 +1415,50 @@ describe('the enrichment trailer echoes the query on one line', () => {
 
     expect(textBlocks(result)[1]).toContain('Query: authors.recid:1000001');
   });
+
+  it('echoes a wildcard, a comparison, a tilde, and edge underscores as written on the Query line and in the trailer, so a content[]-only caller can send the echo back', async () => {
+    routeSummary();
+    const query = 't neutrino* and date > 2015 and a x_ ~y _z';
+
+    const result = await run({ query });
+
+    expect(bodyText(result)).toContain(`**Query:** ${query}`);
+    expect(textBlocks(result)[1]).toContain(`Query: ${query}`);
+    expect(fullText(result)).not.toContain('\\');
+    expect(fullText(result)).not.toContain('&gt;');
+    expect(structured<Output>(result).effectiveQuery).toBe(query);
+    expect(facetParams()?.get('q')).toBe(query);
+  });
 });
 
+const summaryUnreadable = [
+  ['an HTML page', () => htmlResponse()],
+  ['truncated JSON', () => new Response('{"aggregations":', { status: 200 })],
+  ['an empty body', () => new Response('', { status: 200 })],
+  ['JSON without the aggregations', () => jsonResponse({ hits: { total: { value: 1 } } })],
+  ['JSON without the citation_summary aggregation', () => jsonResponse({ aggregations: {} })],
+] as const;
+
 describeFailureClasses({
-  label: 'cern_inspire_get_citation_summary (query target)',
+  label: 'cern_inspire_get_citation_summary (query target, series in parallel)',
   contract: errors,
   invalidQuery: true,
   path: '/api/literature/facets',
+  isAttempt: (request) => request.params.get('facet_name') === 'citation-summary',
   run: (options) => run({ query: 'collaboration:atlas' }, options),
+  install: (harness, reply) =>
+    harness.route('/literature/facets', facetResponder({ summary: reply })),
+  unreadable: summaryUnreadable,
+});
+
+describeFailureClasses({
+  label: 'cern_inspire_get_citation_summary (query target, year filter, summary alone)',
+  contract: errors,
+  invalidQuery: true,
+  path: '/api/literature/facets',
+  run: (options) => run({ query: 'collaboration:atlas', year_from: 2012 }, options),
   install: (harness, reply) => harness.route('/literature/facets', reply),
-  unreadable: [
-    ['an HTML page', () => htmlResponse()],
-    ['truncated JSON', () => new Response('{"aggregations":', { status: 200 })],
-    ['an empty body', () => new Response('', { status: 200 })],
-    ['JSON without the aggregations', () => jsonResponse({ hits: { total: { value: 1 } } })],
-    ['JSON without the citation_summary aggregation', () => jsonResponse({ aggregations: {} })],
-  ],
+  unreadable: summaryUnreadable,
 });
 
 describe('upstream failures on the profile lookup of an author target', () => {
@@ -1038,19 +1511,19 @@ describe('upstream failures on the profile lookup of an author target', () => {
 
   it('reports an unreadable summary after a good profile lookup as upstream_unreadable', async () => {
     routeAuthor();
-    h.route('/literature/facets', htmlResponse());
+    h.route('/literature/facets', facetResponder({ summary: htmlResponse() }));
 
     const result = await runSettled({ author: 'Jane.Doe.1' });
 
     const error = errorEnvelope(result);
     expect(error.data?.reason).toBe('upstream_unreadable');
     expect(requestsTo('/api/authors')).toHaveLength(1);
-    expect(requestsTo('/api/literature/facets').length).toBeGreaterThanOrEqual(3);
+    expect(facetRequests('citation-summary').length).toBeGreaterThanOrEqual(3);
   });
 
   it('reports a 429 on the summary after a good profile lookup as inspire_rate_limited', async () => {
     routeAuthor();
-    h.route('/literature/facets', rateLimitResponse('30'));
+    h.route('/literature/facets', facetResponder({ summary: rateLimitResponse('30') }));
 
     const result = await runSettled({ author: 'Jane.Doe.1' });
 

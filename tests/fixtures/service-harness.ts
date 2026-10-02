@@ -33,6 +33,8 @@ export interface RecordedRequest {
   params: URLSearchParams;
   /** The URL path below the origin, e.g. `/api/literature`. */
   path: string;
+  /** The redirect mode the request was sent with. */
+  redirect: RequestInit['redirect'];
   signal: AbortSignal | undefined;
   url: URL;
 }
@@ -81,6 +83,7 @@ export function createServiceHarness(options: ServiceHarnessOptions = {}): Servi
       params: url.searchParams,
       names: [...url.searchParams.keys()],
       headers: { ...(init?.headers as Record<string, string> | undefined) },
+      redirect: init?.redirect,
       signal: init?.signal ?? undefined,
     });
     return inner(input, init);

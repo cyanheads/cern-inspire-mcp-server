@@ -15,6 +15,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { badRequestBody, jsonResponse, rateLimitResponse } from './inspire-upstream.js';
 import {
   hangingFetch,
+  type RecordedRequest,
   type Responder,
   type ServiceHarness,
   settle,
@@ -37,6 +38,11 @@ export interface FailureSuiteOptions {
   install(h: ServiceHarness, reply: Responder | Response): void;
   /** True when the tool sends a caller query and so declares `invalid_query`. */
   invalidQuery: boolean;
+  /**
+   * Picks the failing request's attempts from those recorded, for a tool that sends
+   * other requests on the same path in parallel; default: every request on `path`.
+   */
+  isAttempt?: (request: RecordedRequest) => boolean;
   /** Name for the `describe` block. */
   label: string;
   /** The request path the non-retried cases count single attempts on; default `/api/literature`. */
@@ -50,6 +56,8 @@ export interface FailureSuiteOptions {
 /** Registers the shared failure-class cases for one tool. */
 export function describeFailureClasses(options: FailureSuiteOptions): void {
   const attemptPath = options.path ?? '/api/literature';
+  const isAttempt =
+    options.isAttempt ?? ((request: RecordedRequest) => request.path === attemptPath);
   const entry = (reason: string): ContractEntry => {
     const found = options.contract.find((e) => e.reason === reason);
     if (!found) throw new Error(`the tool declares no ${reason} entry`);
@@ -164,7 +172,7 @@ export function describeFailureClasses(options: FailureSuiteOptions): void {
         const error = expectDeclared(result, 'invalid_query');
         expect(error.message).toContain('Invalid pagination parameters.');
         expect(error.data?.upstreamMessage).toBe('Invalid pagination parameters.');
-        expect(h.requests.filter((r) => r.path === attemptPath)).toHaveLength(1);
+        expect(h.requests.filter(isAttempt)).toHaveLength(1);
       });
     }
 
@@ -194,7 +202,7 @@ export function describeFailureClasses(options: FailureSuiteOptions): void {
       const error = errorEnvelope(await run());
 
       expect(error.code).toBe(code);
-      expect(h.requests.filter((r) => r.path === attemptPath)).toHaveLength(1);
+      expect(h.requests.filter(isAttempt)).toHaveLength(1);
     });
 
     it('reports a network failure as ServiceUnavailable after retrying', async () => {

@@ -21,6 +21,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { searchHepdataTool } from '@/mcp-server/tools/definitions/search-hepdata.tool.js';
 import { describeFailureClasses } from '../fixtures/failure-suite.js';
+import { MARKUP_AS_TEXT, PUBLISHER_MARKUP } from '../fixtures/inspire-markup.js';
 import {
   dataMetadata,
   dataPage,
@@ -28,6 +29,7 @@ import {
   htmlResponse,
   jsonResponse,
   omit,
+  TWO_RECORD_PAPERS,
   TWO_VERSION_DOIS,
 } from '../fixtures/inspire-upstream.js';
 import { type ServiceHarness, startHarness, stopHarness } from '../fixtures/service-harness.js';
@@ -239,6 +241,12 @@ describe('declared error contracts', () => {
     expect(hint('upstream_unreadable')).toContain('cern_inspire_search_hepdata');
   });
 
+  it('routes an unreadable body to a later retry of the same page and size, never a smaller size that shifts the page', () => {
+    expect(hint('upstream_unreadable')).toBe(
+      'Retry this call in a few seconds; if it fails again, INSPIRE is likely serving an error page, so wait a minute before retrying cern_inspire_search_hepdata with the same page and size.',
+    );
+  });
+
   it('fails page × size over 10,000 as beyond_result_window, before any request', async () => {
     const result = await run({ query: 'x', page: 201, size: 50 });
 
@@ -251,6 +259,11 @@ describe('declared error contracts', () => {
     expect(fullText(result)).toContain('reason beyond_result_window');
     expect(fullText(result)).toContain(`Recovery: ${hint('beyond_result_window')}`);
     expect(h.requests).toHaveLength(0);
+  });
+
+  it('spells the recovery placeholders in capitals, which survive a markdown-to-HTML render', () => {
+    for (const { reason } of errors) expect(hint(reason)).not.toMatch(/<[A-Za-z]/);
+    expect(hint('beyond_result_window')).toContain('a collaborations.value:NAME clause');
   });
 
   it.each([
@@ -411,8 +424,56 @@ describe('zero-hit notice', () => {
     expect(text.startsWith('No HEPData record matched "zzzz nothing". ')).toBe(true);
     expect(text).toContain('"Inclusive"');
     expect(text).toContain('P P --> TOP TOPBAR X');
-    expect(text).toContain('collaborations.value:<name> clause');
+    expect(text).toContain('collaborations.value:NAME clause');
     expect(text).toContain('cern_inspire_search_literature');
+  });
+
+  it('spells its placeholder in capitals on both surfaces, never as an HTML-shaped <name>', async () => {
+    routePage(emptyBody());
+
+    const result = await run({ query: 'zzzz nothing' });
+
+    const text = structured<Output>(result).notice ?? '';
+    expect(text).not.toMatch(/<[A-Za-z]|&[a-z]+;/);
+    expect(fullText(result)).toContain('try fewer words or a collaborations.value:NAME clause');
+    expect(fullText(result)).not.toMatch(/<[A-Za-z]/);
+  });
+
+  it('echoes a wildcard query as written on both surfaces, so it can be sent again', async () => {
+    routePage(emptyBody());
+
+    const result = await run({ query: 'top pair*' });
+
+    expect(structured<Output>(result).notice).toMatch(/^No HEPData record matched "top pair\*"\. /);
+    expect(fullText(result)).toContain('No HEPData record matched "top pair*". ');
+  });
+
+  it('still escapes a link- or HTML-shaped query in the echo', async () => {
+    routePage(emptyBody());
+
+    const result = await run({ query: '[x](javascript:alert(1)) <b>' });
+
+    expect(structured<Output>(result).notice).toContain(
+      'No HEPData record matched "\\[x\\](javascript:alert(1)) &lt;b>".',
+    );
+    expect(fullText(result)).not.toContain('[x](');
+    expect(fullText(result)).not.toContain('<b>');
+  });
+
+  it('echoes a reaction query with its --> as written on both surfaces, with no HTML entity', async () => {
+    routePage(emptyBody());
+
+    const result = await run({ query: 'P P --> ZZQQXXWV ZZQQXXWVBAR X' });
+
+    const text = structured<Output>(result).notice ?? '';
+    expect(text.startsWith('No HEPData record matched "P P --> ZZQQXXWV ZZQQXXWVBAR X". ')).toBe(
+      true,
+    );
+    expect(text).not.toMatch(/&[a-z]+;/);
+    expect(fullText(result)).toContain(
+      'No HEPData record matched "P P --> ZZQQXXWV ZZQQXXWVBAR X". ',
+    );
+    expect(fullText(result)).not.toContain('&gt;');
   });
 
   it('reports a page past the end alone: the query did match', async () => {
@@ -448,7 +509,7 @@ describe('zero-hit notice', () => {
 
     const text = structured<Output>(result).notice ?? '';
     expect(text).not.toMatch(/[\r\n]/);
-    expect(text).toContain('top # injected \\[x\\](http://evil) &lt;b&gt;');
+    expect(text).toContain('top # injected \\[x\\](http://evil) &lt;b>');
     expect(fullText(result)).not.toMatch(/^# injected/m);
   });
 });
@@ -480,14 +541,23 @@ describe('HEPData fields derived from INSPIRE', () => {
       hepdataRecid: '89456',
       latestVersion: 2,
       tableCount: 3,
-      hepdataUrl: 'https://www.hepdata.net/record/ins1680459',
+      hepdataUrl: 'https://www.hepdata.net/record/89456',
     });
     expect(bodyText(result)).toContain(
-      '**Record DOI:** 10.17182/hepdata.89456 · **HEPData recid:** 89456 · **Latest version:** 2 · **Tables:** 3',
+      '**Record DOI:** 10.17182/hepdata.89456 · **HEPData record number:** 89456 · **Latest version:** 2 · **Tables:** 3',
     );
-    expect(bodyText(result)).toContain(
-      '**Record page:** https://www.hepdata.net/record/ins1680459',
-    );
+    expect(bodyText(result)).toContain('**Record page:** https://www.hepdata.net/record/89456');
+    expect(bodyText(result)).not.toContain('HEPData recid');
+  });
+
+  it('describes hepdataRecid as a HEPData record number, not the INSPIRE recid get_paper takes', () => {
+    const description =
+      searchHepdataTool.output.shape.records.element.shape.hepdataRecid.description ?? '';
+
+    expect(description).toContain('HEPData record number');
+    expect(description).toContain('not an INSPIRE recid');
+    expect(description).toContain('paperRecids');
+    expect(description).toContain('cern_inspire_get_paper');
   });
 
   it('counts the tables under the latest version only', async () => {
@@ -559,13 +629,21 @@ describe('HEPData fields derived from INSPIRE', () => {
     expect(bodyText(result)).not.toContain('**Tables:**');
   });
 
-  it('leaves the HEPData recid out when the record DOI is not a hepdata.<n> DOI', async () => {
+  it('leaves the HEPData record number out, and links the first paper’s ins page, when the record DOI is not a hepdata.<n> DOI', async () => {
     const { result, record } = await only([{ value: '10.5072/other.1', material: 'data' }]);
 
     expect(record?.recordDoi).toBe('10.5072/other.1');
     expect(record).not.toHaveProperty('hepdataRecid');
+    expect(record?.hepdataUrl).toBe('https://www.hepdata.net/record/ins1680459');
     expect(bodyText(result)).toContain('**Record DOI:** 10.5072/other.1');
-    expect(bodyText(result)).not.toContain('**HEPData recid:**');
+    expect(bodyText(result)).not.toContain('**HEPData record number:**');
+  });
+
+  it('prints a record DOI as written, its *, _, and ~ unescaped, so it copies back', async () => {
+    const { result, record } = await only([{ value: '10.5281/_x*~1', material: 'data' }]);
+
+    expect(record?.recordDoi).toBe('10.5281/_x*~1');
+    expect(bodyText(result)).toContain('**Record DOI:** 10.5281/_x*~1');
   });
 
   it('keeps a record that carries no DOIs without inventing DOI facts', async () => {
@@ -579,8 +657,8 @@ describe('HEPData fields derived from INSPIRE', () => {
     expect(bodyText(result)).toContain('**Record page:**');
   });
 
-  it('builds the hepdata.net page from the first linked paper', async () => {
-    const { result, record } = await only(TWO_VERSION_DOIS, {
+  it('falls back to the first linked paper’s ins page when the record has no DOI', async () => {
+    const { result, record } = await only(undefined, {
       literature: [{ control_number: 1124337 }, { control_number: 451647 }],
     });
 
@@ -589,9 +667,18 @@ describe('HEPData fields derived from INSPIRE', () => {
     expect(bodyText(result)).toContain('**Paper recids:** 1124337, 451647');
   });
 
-  it('leaves the hepdata.net page out, and says so, when the record links no paper', async () => {
+  it('links the record by its own number even when it links no paper', async () => {
+    const { result, record } = await only(TWO_VERSION_DOIS, { literature: [] });
+
+    expect(record?.paperRecids).toEqual([]);
+    expect(record?.hepdataUrl).toBe('https://www.hepdata.net/record/89456');
+    expect(bodyText(result)).toContain('**Paper recids:** Not available');
+    expect(bodyText(result)).toContain('**Record page:** https://www.hepdata.net/record/89456');
+  });
+
+  it('leaves the hepdata.net page out, and says so, when the record links no paper and its DOI names no record', async () => {
     h = startHarness();
-    routePage(dataPage([omit(dataMetadata(), 'literature')]));
+    routePage(dataPage([omit(dataMetadata({ dois: [] }), 'literature')]));
 
     const result = await run({ query: 'x' });
 
@@ -600,6 +687,29 @@ describe('HEPData fields derived from INSPIRE', () => {
     expect(only).not.toHaveProperty('hepdataUrl');
     expect(bodyText(result)).toContain('**Paper recids:** Not available');
     expect(bodyText(result)).not.toContain('**Record page:**');
+  });
+
+  it('links each of 1797621’s two records to its own record page, not to the shared ins page', async () => {
+    h = startHarness();
+    routePage(
+      dataPage(
+        TWO_RECORD_PAPERS['1797621'].map((r) => ({
+          ...r,
+          literature: [{ control_number: 1797621 }],
+        })),
+      ),
+    );
+
+    const result = await run({ query: 'literature.control_number:1797621' });
+
+    const { records } = structured<Output>(result);
+    expect(records.map((r) => [r.recordDoi, r.tableCount, r.hepdataUrl])).toEqual([
+      ['10.17182/hepdata.156903', 1, 'https://www.hepdata.net/record/156903'],
+      ['10.17182/hepdata.98625', 9, 'https://www.hepdata.net/record/98625'],
+    ]);
+    expect(bodyText(result)).toContain('**Record page:** https://www.hepdata.net/record/156903');
+    expect(bodyText(result)).toContain('**Record page:** https://www.hepdata.net/record/98625');
+    expect(fullText(result)).not.toContain('/record/ins');
   });
 });
 
@@ -662,17 +772,19 @@ describe('records and format() parity', () => {
     expect(text).toContain('**More pages:** yes');
   });
 
-  it('prints keyword reactions with the arrow escaped in content[] and verbatim in structuredContent', async () => {
-    routePage(
-      dataPage([dataMetadata({ keywords: [{ value: 'reactions: P P --> TOP TOPBAR X' }] })]),
-    );
+  it('prints keywords as written on both surfaces, so a keyword copies into keywords.value:"…" unchanged', async () => {
+    const keywords = [
+      'reactions: E+ E- --> D* D*BAR',
+      'observables: M_{T}',
+      'K*(892)',
+      'P P --> TOP TOPBAR X',
+    ];
+    routePage(dataPage([dataMetadata({ keywords: keywords.map((value) => ({ value })) })]));
 
     const result = await run({ query: 'ttbar' });
 
-    expect(structured<Output>(result).records[0]?.keywords).toEqual([
-      'reactions: P P --> TOP TOPBAR X',
-    ]);
-    expect(bodyText(result)).toContain('**Keywords:** reactions: P P --&gt; TOP TOPBAR X');
+    expect(structured<Output>(result).records[0]?.keywords).toEqual(keywords);
+    expect(bodyText(result)).toContain(`**Keywords:** ${keywords.join('; ')}`);
   });
 
   it('labels a truncated abstract snippet and leaves the cut at a word boundary', async () => {
@@ -731,6 +843,78 @@ describe('records and format() parity', () => {
   });
 });
 
+describe('publisher markup in titles and abstracts', () => {
+  it('converts a markup title and decodes an entity-escaped abstract once, on both surfaces', async () => {
+    routePage(
+      dataPage([
+        record(1, {
+          titles: [{ title: PUBLISHER_MARKUP.deGruyter2830751Title }],
+          abstracts: [{ value: PUBLISHER_MARKUP.hepdata3205357Abstract }],
+        }),
+      ]),
+    );
+
+    const result = await run({ query: 'x' });
+
+    const [only] = structured<Output>(result).records;
+    const abstract = MARKUP_AS_TEXT.hepdata3205357Abstract;
+    const snippet = only?.abstractSnippet ?? '';
+    expect(only?.title).toBe(MARKUP_AS_TEXT.deGruyter2830751Title);
+    expect(only?.abstractTruncated).toBe(true);
+    expect(abstract.startsWith(snippet)).toBe(true);
+    expect(snippet).toMatch(/selected within ABS\(ETARAP\) < 0\.5\nand 0\.2$/);
+    const text = bodyText(result);
+    expect(text).toContain(
+      '### 1. Non-binary quantum codes from constacyclic codes over 𝔽_q\\[u_1, u_2,…,u_k\\]/⟨u_i^3 = u_i, u_iu_j = u_ju_i⟩',
+    );
+    expect(text).toContain(
+      '**Abstract** (truncated):\n> Au+Au collisions at RHIC. Event-by-event transverse momentum fluctuations\n> and the dynamical correlator C_pT,',
+    );
+    expect(text).toContain(
+      '> configurations. Charged particles are selected within ABS(ETARAP) &lt; 0.5\n> and 0.2',
+    );
+    expect(text).not.toContain('&amp;');
+  });
+
+  it('leaves out an abstract that is only markup and renders a markup-only title as untitled', async () => {
+    routePage(
+      dataPage([record(1, { titles: [{ title: '<i></i>' }], abstracts: [{ value: '<p> </p>' }] })]),
+    );
+
+    const result = await run({ query: 'x' });
+
+    const [only] = structured<Output>(result).records;
+    expect(only?.title).toBe('');
+    expect(only?.abstractSnippet).toBeUndefined();
+    const text = bodyText(result);
+    expect(text).toContain('### 1. (untitled)');
+    expect(text).not.toContain('**Abstract');
+  });
+
+  it('takes the first abstract with text after conversion when an earlier one is only markup', async () => {
+    routePage(
+      dataPage([
+        record(1, {
+          abstracts: [
+            { value: '<p> </p><p><inline-graphic/></p>' },
+            { value: 'Charged particles within ABS(ETARAP) &lt; 0.5.' },
+            { value: 'A third abstract.' },
+          ],
+        }),
+      ]),
+    );
+
+    const result = await run({ query: 'x' });
+
+    const [only] = structured<Output>(result).records;
+    expect(only?.abstractSnippet).toBe('Charged particles within ABS(ETARAP) < 0.5.');
+    expect(only?.abstractTruncated).toBe(false);
+    expect(bodyText(result)).toContain(
+      '**Abstract:**\n> Charged particles within ABS(ETARAP) &lt; 0.5.',
+    );
+  });
+});
+
 describe('upstream text stays out of inline markdown slots', () => {
   const NEL = String.fromCharCode(0x85);
   const LS = String.fromCharCode(0x2028);
@@ -763,7 +947,7 @@ describe('upstream text stays out of inline markdown slots', () => {
     expect(lines(hostile).some((line) => line.startsWith('# Injected'))).toBe(false);
     expect(lines(hostile).filter((line) => line.startsWith('#'))).toEqual([
       '## HEPData records, page 1',
-      '### 1. Differential cross sections # Injected heading **Citations:** 999999',
+      '### 1. Differential cross sections # Injected heading \\*\\*Citations:\\*\\* 999999',
     ]);
   });
 
@@ -776,7 +960,7 @@ describe('upstream text stays out of inline markdown slots', () => {
     expect(bodyText(result)).toContain('### 1. Differential cross sections x y');
   });
 
-  it('escapes link brackets and angle brackets in titles, collaborations, and keywords', async () => {
+  it('escapes link brackets and angle brackets in titles and collaborations, and in keywords the brackets and a < that opens markup', async () => {
     routePage(
       dataPage([
         dataMetadata({
@@ -794,9 +978,12 @@ describe('upstream text stays out of inline markdown slots', () => {
       '### 1. See \\[the paper\\](http://evil.example.org) &lt;script&gt;x&lt;/script&gt;',
     );
     expect(text).toContain('**Collaborations:** \\[ATLAS\\]');
-    expect(text).toContain('**Keywords:** a &lt;b&gt; \\[c\\]');
+    expect(text).toContain('**Keywords:** a &lt;b> \\[c\\]');
     expect(text).not.toContain('<script>');
-    expect(structured<Output>(result).records[0]?.collaborations).toEqual(['[ATLAS]']);
+    const [only] = structured<Output>(result).records;
+    expect(only?.collaborations).toEqual(['[ATLAS]']);
+    // <script> is outside the markup vocabulary, so it reaches format() as text and the escape above is real.
+    expect(only?.title).toBe('See [the paper](http://evil.example.org) <script>x</script>');
   });
 
   it('keeps a pipe in a title in the heading, where it needs no table escape', async () => {
@@ -806,7 +993,7 @@ describe('upstream text stays out of inline markdown slots', () => {
 
     const text = bodyText(await run({ query: 'x' }));
 
-    expect(text).toContain('### 1. Measurement of |V_{cb}| in B decays');
+    expect(text).toContain('### 1. Measurement of |V\\_{cb}| in B decays');
   });
 
   it('keeps every line of a multi-line abstract inside the blockquote', async () => {

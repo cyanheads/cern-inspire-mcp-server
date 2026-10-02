@@ -1,12 +1,14 @@
 /**
  * @fileoverview Raw INSPIRE records → the normalized domain shapes the tools
  * return. Absent upstream fields stay absent (conditional spreads), never filled
- * with invented values; strings are copied verbatim.
+ * with invented values. Titles and abstracts are converted from publisher markup
+ * to text (`markupToText`) before snippets are cut and titles de-duplicated;
+ * every other string is copied verbatim.
  * @module services/inspire/normalize
  */
 
 import { serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
-import type { PaperIdKind } from './identifiers.js';
+import { containsMarkup, markupToText } from './markup-to-text.js';
 import type {
   AuthorPosition,
   AuthorProfile,
@@ -15,16 +17,19 @@ import type {
   CitationExportFormat,
   CitationSummary,
   CitationTotals,
+  CitationYear,
   ExperimentRecord,
   HepdataAvailability,
   HepdataRecord,
   LiteratureHit,
   PaperAuthor,
+  PaperDossier,
   PaperLookup,
   PaperPublication,
   RawAuthorMetadata,
   RawCitationBucketSet,
   RawCitationSummaryResponse,
+  RawCitationsByYearResponse,
   RawDataDoi,
   RawDataMetadata,
   RawExperimentMetadata,
@@ -124,18 +129,37 @@ function isHighSurrogate(code: number): boolean {
   return code >= 0xd800 && code <= 0xdbff;
 }
 
-/** The arXiv-sourced abstract when one exists, else the first. */
+/** A title or abstract as text, or `undefined` when nothing but markup or whitespace is left. */
+const textOf = (value: unknown): string | undefined =>
+  typeof value === 'string' ? str(markupToText(value)) : undefined;
+
+/**
+ * The arXiv-sourced abstract when one exists, else the first, as text; an
+ * abstract that is only markup gives way to the next, and one whose text still
+ * holds markup after its one decode (CDS's entity-escaped HTML) gives way to any
+ * clean one, but is kept when no other has text.
+ */
 function pickAbstract(
   abstracts: readonly { source?: string; value?: string }[] | undefined,
 ): { source?: string; value: string } | undefined {
-  const present = (abstracts ?? []).filter((a) => str(a.value));
-  const chosen = present.find((a) => a.source === 'arXiv') ?? present[0];
-  const value = str(chosen?.value);
-  return value === undefined ? undefined : { value, ...opt('source', str(chosen?.source)) };
+  const list = abstracts ?? [];
+  const ordered = [
+    ...list.filter((a) => a.source === 'arXiv'),
+    ...list.filter((a) => a.source !== 'arXiv'),
+  ];
+  let stillMarked: { source?: string; value: string } | undefined;
+  for (const candidate of ordered) {
+    const value = textOf(candidate.value);
+    if (value === undefined) continue;
+    const picked = { value, ...opt('source', str(candidate.source)) };
+    if (!containsMarkup(value)) return picked;
+    stillMarked ??= picked;
+  }
+  return stillMarked;
 }
 
 const titlesOf = (titles: readonly { title?: string }[] | undefined): string[] =>
-  strings((titles ?? []).map((t) => t.title));
+  strings((titles ?? []).map((t) => textOf(t.title)));
 
 function pageRange(info: RawPublicationInfo): string | undefined {
   const start = str(info.page_start);
@@ -195,7 +219,20 @@ function hepdataDoiFacts(dois: readonly RawDataDoi[] | undefined): HepdataDoiFac
   };
 }
 
-const hepdataRecordUrl = (paperRecid: string) => `${HEPDATA_WEB}/record/ins${paperRecid}`;
+/**
+ * A record's hepdata.net page: HEPData's numbered route `/record/<n>` when the
+ * record DOI names the number, which opens record n whatever INSPIRE ID HEPData
+ * stores on it. Otherwise `/record/ins<paper recid>`, which HEPData resolves by
+ * that stored ID — the recid the data was submitted under, which INSPIRE may
+ * since have merged into another paper. Absent with neither.
+ */
+function hepdataRecordUrl(
+  hepdataRecid: string | undefined,
+  paperRecid: string | undefined,
+): string | undefined {
+  if (hepdataRecid !== undefined) return `${HEPDATA_WEB}/record/${hepdataRecid}`;
+  return paperRecid === undefined ? undefined : `${HEPDATA_WEB}/record/ins${paperRecid}`;
+}
 
 // ─── Literature ─────────────────────────────────────────────────────────────
 
@@ -258,11 +295,15 @@ function toPublication(info: RawPublicationInfo): PaperPublication[] {
   return Object.keys(publication).length === 0 ? [] : [publication];
 }
 
-/** The `get_paper` dossier, its author list capped at `maxAuthors`. */
+/**
+ * The `get_paper` dossier, its author list capped at `maxAuthors`; `resolution`
+ * names the identifier form the paper input took and, after a merged recid's
+ * redirect, the recid asked for.
+ */
 export function toPaperLookup(
   m: RawLiteratureMetadata,
   hitId: string | undefined,
-  resolvedAs: PaperIdKind,
+  resolution: Pick<PaperDossier, 'mergedFrom' | 'resolvedAs'>,
   hepdata: HepdataAvailability,
   maxAuthors: number,
 ): PaperLookup {
@@ -275,7 +316,8 @@ export function toPaperLookup(
     authorsInRecord: authors.length,
     paper: {
       recid,
-      resolvedAs,
+      ...opt('mergedFrom', resolution.mergedFrom),
+      resolvedAs: resolution.resolvedAs,
       title,
       alternateTitles: unique(otherTitles.filter((t) => t !== title)),
       ...(abstract ? { abstract: abstract.value, ...opt('abstractSource', abstract.source) } : {}),
@@ -319,19 +361,36 @@ export function toPaperLookup(
   };
 }
 
-/** HEPData availability for a paper from its `data`-collection lookup. */
+/**
+ * HEPData availability for a paper from its `data`-collection lookup. Nothing in
+ * INSPIRE's data records marks one record as the paper's own, so the record facts
+ * describe the lowest HEPData record number on the page, and `otherRecords` lists
+ * the rest in ascending order (records whose DOI names no number last, in
+ * INSPIRE's order); it is absent when the page holds one record.
+ */
 export function toHepdataAvailability(
   envelope: RawSearchEnvelope<RawDataMetadata>,
   paperRecid: string,
 ): HepdataAvailability {
-  const hit = envelope.hits.hits[0];
-  if (envelope.hits.total === 0 || !hit) return { status: 'none' };
-  const { hepdataRecid: _omitted, ...facts } = hepdataDoiFacts(hit.metadata?.dois);
+  if (envelope.hits.total === 0 || envelope.hits.hits.length === 0) return { status: 'none' };
+  const [first, ...others] = envelope.hits.hits
+    .map((hit) => {
+      const { hepdataRecid, ...facts } = hepdataDoiFacts(hit.metadata?.dois);
+      return {
+        number: hepdataRecid === undefined ? Number.POSITIVE_INFINITY : Number(hepdataRecid),
+        facts: {
+          ...opt('inspireDataRecid', readRecid(hit.metadata?.control_number, hit.id)),
+          ...facts,
+          ...opt('hepdataUrl', hepdataRecordUrl(hepdataRecid, paperRecid)),
+        },
+      };
+    })
+    .sort((a, b) => (a.number === b.number ? 0 : a.number - b.number))
+    .map((record) => record.facts);
   return {
     status: 'available',
-    ...opt('inspireDataRecid', readRecid(hit.metadata?.control_number, hit.id)),
-    ...facts,
-    hepdataUrl: hepdataRecordUrl(paperRecid),
+    ...first,
+    ...opt('otherRecords', others.length > 0 ? others : undefined),
   };
 }
 
@@ -448,6 +507,22 @@ export function toCitationSummary(body: RawCitationSummaryResponse): CitationSum
   };
 }
 
+/**
+ * The `citations_by_year` map as rows in ascending year order. A key that is not
+ * a four-digit year or a count that is not a number is dropped, and a year
+ * INSPIRE leaves out stays absent: no zero row is added.
+ */
+export function toCitationsByYear(body: RawCitationsByYearResponse): CitationYear[] {
+  return Object.entries(body.aggregations.citations_by_year.value)
+    .flatMap(([key, value]) => {
+      const citations = num(value);
+      return /^\d{4}$/.test(key) && citations !== undefined
+        ? [{ year: Number(key), citations }]
+        : [];
+    })
+    .sort((a, b) => a.year - b.year);
+}
+
 // ─── Experiments ────────────────────────────────────────────────────────────
 
 /** INSPIRE's `date_completed` sentinel for an experiment still running. */
@@ -519,8 +594,11 @@ export function toHepdataRecord(hit: RawHit<RawDataMetadata>): HepdataRecord {
     const recid = readRecid(l.control_number);
     return recid === undefined ? [] : [recid];
   });
-  const abstract = values(m.abstracts)[0];
+  const abstract = values(m.abstracts)
+    .map(textOf)
+    .find((text) => text !== undefined);
   const cut = abstract === undefined ? undefined : snippet(abstract);
+  const facts = hepdataDoiFacts(m.dois);
   return {
     inspireDataRecid: recidOf(m.control_number, hit.id),
     title: titlesOf(m.titles)[0] ?? '',
@@ -529,11 +607,8 @@ export function toHepdataRecord(hit: RawHit<RawDataMetadata>): HepdataRecord {
     experiments: strings((m.accelerator_experiments ?? []).map((e) => e.legacy_name)),
     keywords: values(m.keywords),
     ...(cut ? { abstractSnippet: cut.text, abstractTruncated: cut.truncated } : {}),
-    ...hepdataDoiFacts(m.dois),
-    ...opt(
-      'hepdataUrl',
-      paperRecids[0] === undefined ? undefined : hepdataRecordUrl(paperRecids[0]),
-    ),
+    ...facts,
+    ...opt('hepdataUrl', hepdataRecordUrl(facts.hepdataRecid, paperRecids[0])),
     ...opt('created', str(m.creation_date)),
     ...opt('citationCount', num(m.citation_count)),
   };

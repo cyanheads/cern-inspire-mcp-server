@@ -266,6 +266,17 @@ describe('declared error contracts', () => {
   });
 });
 
+describe('next-step descriptions', () => {
+  it('names the affid:N query a position institution recid feeds', () => {
+    const position = searchAuthorsTool.output.shape.authors.element.shape.currentPositions.element;
+    const description = position.shape.institutionRecid.description ?? '';
+
+    expect(description).toContain('affid:N');
+    expect(description).toContain('cern_inspire_search_literature');
+    expect(description).toContain('cern_inspire_get_citation_summary');
+  });
+});
+
 describe('required enrichment', () => {
   it('writes every required field on a zero-result page', async () => {
     routePage(emptyBody());
@@ -377,15 +388,48 @@ describe('zero-hit notice', () => {
     expect(text).toContain('Author and literature records are numbered separately');
   });
 
-  it('echoes the query through inline(): newlines flatten and brackets are escaped', async () => {
+  it('spells the name placeholder in capitals on both surfaces, never as an HTML-shaped tag', async () => {
+    routePage(emptyBody());
+
+    const result = await run({ query: 'Zzzz, Nobody' });
+
+    const hint =
+      'Try "Last, First", fewer name parts, or search papers with cern_inspire_search_literature using "a NAME".';
+    expect(structured<Output>(result).notice).toContain(hint);
+    expect(structured<Output>(result).notice).not.toMatch(/<[A-Za-z]|&[a-z]+;/);
+    expect(fullText(result)).toContain(hint);
+    expect(fullText(result)).not.toMatch(/<[A-Za-z]/);
+  });
+
+  it('echoes the query through callerEcho(): newlines flatten and brackets are escaped', async () => {
     routePage(emptyBody());
 
     const result = await run({ query: 'Doe\r\n# injected\n[x](http://evil) <b>' });
 
     const text = structured<Output>(result).notice ?? '';
     expect(text).not.toMatch(/[\r\n]/);
-    expect(text).toContain('Doe # injected \\[x\\](http://evil) &lt;b&gt;');
+    expect(text).toContain('Doe # injected \\[x\\](http://evil) &lt;b>');
     expect(fullText(result)).not.toMatch(/^# injected/m);
+  });
+
+  it('echoes a wildcard query as written on both surfaces, so it can be sent again', async () => {
+    routePage(emptyBody());
+
+    const result = await run({ query: 'Higgs*' });
+
+    expect(structured<Output>(result).notice).toMatch(
+      /^No INSPIRE author profile matched "Higgs\*" as name\. /,
+    );
+    expect(fullText(result)).toContain('No INSPIRE author profile matched "Higgs*" as name. ');
+  });
+
+  it('still escapes a link-shaped query in the content[] echo', async () => {
+    routePage(emptyBody());
+
+    const result = await run({ query: '[x](javascript:alert(1))' });
+
+    expect(fullText(result)).toContain('"\\[x\\](javascript:alert(1))" as name');
+    expect(fullText(result)).not.toContain('[x](');
   });
 });
 
@@ -448,6 +492,24 @@ describe('surname-miss notice', () => {
     const out = structured<Output>(await run({ query: 'Maldacen, Juan' }));
 
     expect(out.notice).toBe(surnameMiss('Maldacen, Juan'));
+  });
+
+  it('echoes a wildcard query as written on both surfaces, so it can be sent again', async () => {
+    routePage(authorPage([named(1, 'Mendez, Juan')]));
+
+    const result = await run({ query: 'Maldecen*, Juan' });
+
+    expect(structured<Output>(result).notice).toBe(surnameMiss('Maldecen*, Juan'));
+    expect(fullText(result)).toContain('a surname in "Maldecen*, Juan";');
+  });
+
+  it('still escapes a link-shaped query in the content[] echo', async () => {
+    routePage(authorPage([named(1, 'Mendez, Juan')]));
+
+    const result = await run({ query: '[x](javascript:alert(1)), Juan' });
+
+    expect(fullText(result)).toContain('a surname in "\\[x\\](javascript:alert(1)), Juan";');
+    expect(fullText(result)).not.toContain('[x](');
   });
 
   it.each([
@@ -717,6 +779,40 @@ describe('profiles and format() parity', () => {
     expect(bodyText(result)).toContain('**Other IDs:** TWITTER jane_doe; SPIRES HEPNAMES-1');
   });
 
+  it('prints identifier values as written in content[], so a caller can copy them', async () => {
+    routePage(
+      authorPage([
+        authorMetadata({
+          ids: [
+            { schema: 'INSPIRE BAI', value: 'J.Ellis_.1' },
+            { schema: 'ORCID', value: '0000-0002-1825-0097' },
+            { schema: 'INSPIRE ID', value: 'INSPIRE-00123456' },
+            { schema: 'WIKIPEDIA', value: 'John_Ellis_(physicist,_born_1946)' },
+            { schema: 'TWITTER', value: '_jdoe_' },
+            { schema: 'LINKEDIN', value: '[x](javascript:alert(1))' },
+          ],
+        }),
+      ]),
+    );
+
+    const result = await run({ query: 'J.Ellis_.1' });
+
+    const [only] = structured<Output>(result).authors;
+    expect(only?.bai).toBe('J.Ellis_.1');
+    expect(only?.otherIds).toEqual([
+      { schema: 'WIKIPEDIA', value: 'John_Ellis_(physicist,_born_1946)' },
+      { schema: 'TWITTER', value: '_jdoe_' },
+      { schema: 'LINKEDIN', value: '[x](javascript:alert(1))' },
+    ]);
+    const text = bodyText(result);
+    expect(text).toContain(
+      '**BAI:** J.Ellis_.1 · **ORCID:** 0000-0002-1825-0097 · **INSPIRE ID:** INSPIRE-00123456',
+    );
+    expect(text).toContain(
+      '**Other IDs:** WIKIPEDIA John_Ellis_(physicist,_born_1946); TWITTER _jdoe_; LINKEDIN \\[x\\](javascript:alert(1))',
+    );
+  });
+
   it('renders no content blocks other than text', async () => {
     routePage(pageOf(1));
 
@@ -773,7 +869,7 @@ describe('upstream text stays out of inline markdown slots', () => {
     expect(lines(hostile).some((line) => line.startsWith('# Injected'))).toBe(false);
     expect(lines(hostile).filter((line) => line.startsWith('#'))).toEqual([
       '## INSPIRE author profiles (1)',
-      '### 1. Doe, Jane # Injected heading **Status:** forged (preferred: Jane Doe # Injected heading **Status:** forged)',
+      '### 1. Doe, Jane # Injected heading \\*\\*Status:\\*\\* forged (preferred: Jane Doe # Injected heading \\*\\*Status:\\*\\* forged)',
     ]);
   });
 

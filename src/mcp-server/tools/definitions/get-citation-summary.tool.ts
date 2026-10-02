@@ -1,8 +1,8 @@
 /**
  * @fileoverview cern_inspire_get_citation_summary — INSPIRE's citation summary
  * (h-index, citation totals and averages, papers per citation bucket, for all
- * citeable and for published papers) for one author identifier or any
- * literature query, narrowed by document type, subject, and year.
+ * citeable and for published papers) and citations per year for one author
+ * identifier or any literature query, narrowed by document type, subject, and year.
  * @module mcp-server/tools/definitions/get-citation-summary.tool
  */
 
@@ -18,10 +18,31 @@ import {
   yearToInput,
 } from '@/mcp-server/tools/inputs.js';
 import { containsOrcid, routeAuthorQuery } from '@/services/inspire/identifiers.js';
-import { getInspireService } from '@/services/inspire/inspire-service.js';
-import type { FacetFilters } from '@/services/inspire/types.js';
+import {
+  BROAD_SERIES_RECORDS,
+  CITATIONS_BY_YEAR_BUDGET_MS,
+  getInspireService,
+} from '@/services/inspire/inspire-service.js';
+import type { FacetFilters, SeriesIgnoredFilter } from '@/services/inspire/types.js';
 import { CITATION_BUCKET_RANGES } from '@/services/inspire/vocabulary.js';
-import { cell, inline } from '@/utils/render.js';
+import { callerEcho, cell, inline } from '@/utils/render.js';
+
+/**
+ * Up to this many matched records, a repeat of a cut series may be answered from
+ * INSPIRE's cache: measured 2026-10-01/02, 210,258 records were cached and served
+ * warm 40 s later and 278,875 counted cold in 24.6 s, while 644,458 and 1,278,435
+ * drew a 500 after 30.5 s and cached nothing. Past it the notice says only to narrow.
+ */
+const REPEATABLE_SERIES_RECORDS = 300_000;
+
+/** The input that sets each filter the per-year series ignores. */
+const IGNORED_FILTER_INPUTS = {
+  yearFrom: 'year_from',
+  yearTo: 'year_to',
+  excludeSelfCitations: 'exclude_self_citations',
+} as const satisfies Record<SeriesIgnoredFilter, string>;
+
+const conjunction = new Intl.ListFormat('en', { type: 'conjunction' });
 
 const totalsSchema = (scope: string) =>
   z
@@ -78,19 +99,19 @@ function renderBuckets(all: Buckets, published: Buckets): string[] {
 export const getCitationSummaryTool = tool('cern_inspire_get_citation_summary', {
   title: 'Get INSPIRE citation summary',
   description:
-    'Compute INSPIRE-HEP\'s citation summary for one author or for any literature query: h-index, citation totals, average citations per paper, and paper counts per citation bucket (0, 1–9, 10–49, 50–99, 100–249, 250–499, 500+), each for all citeable papers and for published papers. Pass exactly one of author (a BAI, ORCID, INSPIRE ID, or author recid — resolve a name with cern_inspire_search_authors first) or query (any INSPIRE literature query: a topic, collaboration, institution, or "a <BAI>"). Document type, subject, and year filters narrow every figure; exclude_self_citations recounts without self-citations.',
+    'Compute INSPIRE-HEP\'s citation summary for one author or for any literature query: h-index, citation totals, average citations per paper, and paper counts per citation bucket (0, 1–9, 10–49, 50–99, 100–249, 250–499, 500+), each for all citeable papers and for published papers, plus citations received per year. Pass exactly one of author (a BAI, ORCID, INSPIRE ID, or author recid — resolve a name with cern_inspire_search_authors first) or query (any INSPIRE literature query: a topic, collaboration, institution, or "a <BAI>"). Document type and subject filters narrow every figure. year_from and year_to narrow the summary to papers from those years, and exclude_self_citations recounts it without self-citations; any of them leaves out citations per year, which INSPIRE cannot narrow that way.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     author: authorIdInput,
     query: blankAsUnset(z.string().trim().max(1000).optional()).describe(
-      'An INSPIRE literature query, e.g. "collaboration:atlas", "t neutrino oscillation", "a Edward.Witten.1". Literature queries do not match ORCIDs; pass an ORCID as author. Pass this or author, not both.',
+      'An INSPIRE literature query, e.g. "collaboration:atlas", "t neutrino oscillation", "a Edward.Witten.1", or "affid:902725" for an institution\'s papers (CERN; affid takes the institution recid that cern_inspire_search_authors and cern_inspire_search_experiments return). Literature queries do not match ORCIDs; pass an ORCID as author. Pass this or author, not both.',
     ),
     document_types: documentTypesInput,
     subjects: subjectsInput,
     year_from: yearFromInput,
     year_to: yearToInput,
     exclude_self_citations: blankAsUnset(z.boolean().default(false)).describe(
-      "Count citations without self-citations (INSPIRE's definition), default false.",
+      "Count citations without self-citations (INSPIRE's definition), default false. Setting it leaves out citationsByYear, which always includes self-citations.",
     ),
   }),
   output: z.object({
@@ -128,6 +149,21 @@ export const getCitationSummaryTool = tool('cern_inspire_get_citation_summary', 
         published: bucketsSchema('published'),
       })
       .describe('Papers per citation range, for all citeable and for published papers.'),
+    citationsByYear: z
+      .array(
+        z
+          .object({
+            year: z.number().describe("Year of the citing records' earliest date."),
+            citations: z
+              .number()
+              .describe('Citations the matched records received from records of that year.'),
+          })
+          .describe('Citations received in one year.'),
+      )
+      .optional()
+      .describe(
+        "Citations per year in ascending order, each counted in the year of the citing record's earliest date, self-citations included, over every matched record (citeable or not), so the sum can exceed all.citations. A year without citations has no row, and the current year counts citations to date. Empty when nothing matched or no matched record is cited; omitted when year_from, year_to, or exclude_self_citations is set, when INSPIRE did not return the series, or when the query matches more than about 150,000 records, which INSPIRE cannot count in time, unless INSPIRE answers within about 2 s (a series it has cached).",
+      ),
   }),
   enrichment: {
     effectiveQuery: z.string().describe('The literature query sent to INSPIRE.'),
@@ -136,11 +172,16 @@ export const getCitationSummaryTool = tool('cern_inspire_get_citation_summary', 
       .describe(
         'Filters applied, e.g. "document_types=published; years=2012–2015; exclude_self_citations=true", or "none".',
       ),
-    notice: z.string().optional().describe('Guidance when no citeable paper matched.'),
+    notice: z
+      .string()
+      .optional()
+      .describe(
+        'Guidance when no citeable paper matched, or when citations per year were left out or could not be read.',
+      ),
   },
   enrichmentTrailer: {
-    // The caller's query reaches the content[] trailer; inline() keeps a newline in it from forging structure.
-    effectiveQuery: { render: (query) => `Query: ${inline(query)}` },
+    // The framework prints an echo unescaped; callerEcho() flattens it to one line and keeps it sendable as written.
+    effectiveQuery: { render: (query) => `Query: ${callerEcho(query)}` },
     appliedFilters: { label: 'Applied filters' },
   },
   errors: [
@@ -261,7 +302,7 @@ export const getCitationSummaryTool = tool('cern_inspire_get_citation_summary', 
       if (route.matchedAs === 'name') {
         throw ctx.fail(
           'author_not_identifier',
-          `author "${inline(input.author)}" is not a BAI, ORCID, INSPIRE ID, or author recid.`,
+          `author "${callerEcho(input.author)}" is not a BAI, ORCID, INSPIRE ID, or author recid.`,
           { author: input.author },
         );
       }
@@ -269,7 +310,7 @@ export const getCitationSummaryTool = tool('cern_inspire_get_citation_summary', 
       if (!resolved) {
         throw ctx.fail(
           'author_not_found',
-          `No INSPIRE author profile matched "${inline(input.author)}" as ${route.matchedAs}.`,
+          `No INSPIRE author profile matched "${callerEcho(input.author)}" as ${route.matchedAs}.`,
           { author: input.author, matchedAs: route.matchedAs },
         );
       }
@@ -284,7 +325,7 @@ export const getCitationSummaryTool = tool('cern_inspire_get_citation_summary', 
     }
     ctx.enrich.echo(target.query);
 
-    const summary = await inspire.getCitationSummary(
+    const { summary, series } = await inspire.getCitationSummary(
       { query: target.query, excludeSelfCitations: input.exclude_self_citations, ...filters },
       call,
     );
@@ -292,19 +333,45 @@ export const getCitationSummaryTool = tool('cern_inspire_get_citation_summary', 
       kind: target.kind,
       matchedRecords: summary.matchedRecords,
       citeablePapers: summary.citeablePapers,
+      citationsByYear: series.status,
     });
 
+    const notices: string[] = [];
     if (summary.citeablePapers === 0) {
-      const notices = [
+      notices.push(
         'No citeable papers matched; the summary is all zeros. Check the query with cern_inspire_search_literature first.',
-      ];
+      );
       if (input.query && containsOrcid(input.query)) {
         notices.push('Literature queries do not match ORCIDs; pass the ORCID as author instead.');
       }
-      ctx.enrich.notice(notices.join(' '));
     }
+    if (series.status === 'skipped') {
+      const ignored = conjunction.format(
+        series.ignoredFilters.map((f) => IGNORED_FILTER_INPUTS[f]),
+      );
+      notices.push(
+        `Citations per year are not included: INSPIRE's per-year series ignores ${ignored}, so it would not match the filtered figures. Call again without ${ignored} for citations per year (all years, self-citations included).`,
+      );
+    } else if (series.status === 'too_broad') {
+      const next =
+        summary.matchedRecords <= REPEATABLE_SERIES_RECORDS
+          ? 'Repeat this call in about 30 s, since INSPIRE may finish the count meanwhile and answer from its cache, or narrow the query text, document_types, or subjects'
+          : 'Narrow the query text, document_types, or subjects for them';
+      notices.push(
+        `Citations per year are not included: this query matches ${summary.matchedRecords.toLocaleString('en-US')} records, and past about ${BROAD_SERIES_RECORDS.toLocaleString('en-US')} INSPIRE takes longer than ${CITATIONS_BY_YEAR_BUDGET_MS / 1000} s to count them. ${next} (year_from and year_to leave citations per year out).`,
+      );
+    } else if (series.status === 'failed') {
+      notices.push(
+        'Citations per year could not be read from INSPIRE this time; every other figure is complete. Retry this call for them.',
+      );
+    }
+    if (notices.length > 0) ctx.enrich.notice(notices.join(' '));
 
-    return { target, ...summary };
+    return {
+      target,
+      ...summary,
+      ...(series.status === 'read' ? { citationsByYear: series.rows } : {}),
+    };
   },
 
   format: (result) => {
@@ -315,7 +382,7 @@ export const getCitationSummaryTool = tool('cern_inspire_get_citation_summary', 
         : undefined;
     const lines = [
       `## INSPIRE citation summary${subject ? ` — ${subject}` : ''}`,
-      `**Target kind:** ${t.kind} · **Query:** ${inline(t.query)}`,
+      `**Target kind:** ${t.kind} · **Query:** ${callerEcho(t.query)}`,
       `**Matched records:** ${result.matchedRecords} · **Citeable papers:** ${result.citeablePapers}`,
       `**h-index:** ${result.hIndex.all} (all citeable) · ${result.hIndex.published} (published)`,
       '',
@@ -326,6 +393,18 @@ export const getCitationSummaryTool = tool('cern_inspire_get_citation_summary', 
     ];
     if (result.buckets.all.length > 0 || result.buckets.published.length > 0) {
       lines.push('', ...renderBuckets(result.buckets.all, result.buckets.published));
+    }
+    if (result.citationsByYear?.length === 0) {
+      lines.push('', '**Citations per year:** none recorded');
+    } else if (result.citationsByYear) {
+      lines.push(
+        '',
+        "**Citations per year** — by the citing record's earliest date, self-citations included, over every matched record (citeable or not):",
+        '',
+        '| Year | Citations |',
+        '|:--|--:|',
+        ...result.citationsByYear.map((row) => `| ${row.year} | ${row.citations} |`),
+      );
     }
     return [{ type: 'text', text: lines.join('\n') }];
   },

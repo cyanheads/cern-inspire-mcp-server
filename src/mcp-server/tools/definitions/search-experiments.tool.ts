@@ -10,7 +10,7 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { blankAsUnset } from '@/mcp-server/tools/inputs.js';
 import { getInspireService } from '@/services/inspire/inspire-service.js';
-import { atLineStart, inline, printUrl, quote } from '@/utils/render.js';
+import { atLineStart, callerEcho, inline, printUrl, quote } from '@/utils/render.js';
 
 const MAX_LIMIT = 25;
 
@@ -29,7 +29,12 @@ const experimentSchema = z
         z
           .object({
             name: z.string().describe('Institution name.'),
-            recid: z.string().optional().describe('INSPIRE institution record ID, when linked.'),
+            recid: z
+              .string()
+              .optional()
+              .describe(
+                "INSPIRE institution record ID, when linked; pass affid:N, N being this ID, as the query of cern_inspire_search_literature or cern_inspire_get_citation_summary for the institution's papers.",
+              ),
           })
           .describe('One host institution.'),
       )
@@ -246,7 +251,7 @@ export const searchExperimentsTool = tool('cern_inspire_search_experiments', {
 
     if (shown === 0) {
       ctx.enrich.notice(
-        `No INSPIRE experiment matched "${inline(input.query)}". Try the collaboration's common name or the accelerator (LHC, Tevatron), or search papers with cern_inspire_search_literature using "collaboration:<name>".`,
+        `No INSPIRE experiment matched "${callerEcho(input.query)}". Try the collaboration's common name or the accelerator (LHC, Tevatron), or search papers with cern_inspire_search_literature using "collaboration:NAME".`,
       );
     } else if (result.total > shown) {
       ctx.enrich.truncated({

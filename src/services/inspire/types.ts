@@ -165,6 +165,12 @@ export interface RawCitationSummaryResponse {
   hits?: { total?: { value?: number } };
 }
 
+/** The `citations_by_year` facet: an unordered `{ "YYYY": count }` map, `{}` on zero matches. */
+export interface RawCitationsByYearResponse {
+  aggregations: { citations_by_year: { value: Record<string, unknown> } };
+  hits?: { total?: { value?: number } };
+}
+
 // ─── Request parameters ─────────────────────────────────────────────────────
 
 export type LiteratureSort = 'relevance' | 'mostrecent' | 'mostcited';
@@ -188,8 +194,10 @@ export interface LiteratureSearchParams extends FacetFilters {
 
 export interface CitationExportParams {
   format: CitationExportFormat;
+  /** 1-based; page 1 asks for one entry more than `size` to detect truncation. */
+  page: number;
   query: string;
-  /** Entries wanted; the service asks for one more to detect truncation. */
+  /** Entries per page. */
   size: number;
   sort: LiteratureSort;
 }
@@ -255,14 +263,30 @@ export interface PaperPublication {
   year?: number;
 }
 
-/** HEPData availability for one paper, read from INSPIRE's `data` collection. */
-export interface HepdataAvailability {
+/** One HEPData record linked to a paper, as INSPIRE's `data` collection describes it. */
+export interface HepdataRecordFacts {
+  /** `https://www.hepdata.net/record/<n>` from the record DOI, else the paper's `ins<recid>` page. */
   hepdataUrl?: string;
   inspireDataRecid?: string;
   latestVersion?: number;
   recordDoi?: string;
-  status: 'available' | 'none' | 'lookup_failed';
   tableCount?: number;
+}
+
+/**
+ * HEPData availability for one paper, read from INSPIRE's `data` collection. The
+ * record facts describe the lowest-numbered record the lookup returned (it reads up
+ * to 10); `otherRecords` holds the rest and is absent when the paper has one.
+ */
+export interface HepdataAvailability extends HepdataRecordFacts {
+  otherRecords?: HepdataRecordFacts[];
+  status: 'available' | 'none' | 'lookup_failed';
+}
+
+/** A paper's HEPData availability and INSPIRE's count of its data records (`hits.total`). */
+export interface HepdataLookup {
+  availability: HepdataAvailability;
+  recordCount: number;
 }
 
 export interface PaperDossier {
@@ -288,6 +312,8 @@ export interface PaperDossier {
   inspireUrl: string;
   keywords: string[];
   licenses: { imposing?: string; material?: string; url: string }[];
+  /** The recid asked for, when INSPIRE had merged it into this record and redirected it here. */
+  mergedFrom?: string;
   numberOfPages?: number;
   preprintDate?: string;
   publicationDate?: string;
@@ -306,6 +332,8 @@ export interface PaperDossier {
 export interface PaperLookup {
   /** Length of the record's downloaded author list, before the `maxAuthors` cap. */
   authorsInRecord: number;
+  /** INSPIRE's count of the paper's HEPData records; absent when the lookup failed. */
+  hepdataRecordCount?: number;
   paper: PaperDossier;
 }
 
@@ -316,7 +344,15 @@ export interface CitationEntry {
 
 export interface CitationExport {
   entries: CitationEntry[];
-  /** True when more than `size` entries came back. */
+  /**
+   * INSPIRE's match total, read on a later page only: absent on page 1, whose
+   * extra entry answers `truncated`, and when a later page's total request failed.
+   */
+  total?: number;
+  /**
+   * True when more matched papers follow this page. On a later page without a
+   * total, true when the page came back full.
+   */
   truncated: boolean;
 }
 
@@ -378,6 +414,31 @@ export interface CitationSummary {
   hIndex: { all: number; published: number };
   matchedRecords: number;
   published: CitationTotals;
+}
+
+/** Citations made in one year (the citing record's earliest date) to the matched records. */
+export interface CitationYear {
+  citations: number;
+  year: number;
+}
+
+/** The filters INSPIRE's citations-by-year facet ignores; with any set, the series is not requested. */
+export type SeriesIgnoredFilter = 'yearFrom' | 'yearTo' | 'excludeSelfCitations';
+
+/**
+ * The per-year series beside a citation summary: read; not requested because a
+ * filter it ignores was set; cut early because the query matches more records
+ * than INSPIRE counts in time; or failed. The summary is returned in every case.
+ */
+export type CitationSeries =
+  | { rows: CitationYear[]; status: 'read' }
+  | { ignoredFilters: SeriesIgnoredFilter[]; status: 'skipped' }
+  | { status: 'too_broad' }
+  | { status: 'failed' };
+
+export interface CitationSummaryLookup {
+  series: CitationSeries;
+  summary: CitationSummary;
 }
 
 export interface ExperimentRecord {

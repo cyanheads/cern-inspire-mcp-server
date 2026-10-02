@@ -2,16 +2,29 @@
  * @fileoverview Tests for the shared markdown render module: `inline()` and
  * `cell()` flatten and neutralize upstream text, `quote()` blockquotes free text,
  * `fenced()` fences verbatim citation entries, `printUrl()` makes a URL safe to
- * print, and `atLineStart()` keeps text that opens a line or list item from
- * opening a block. Upstream strings are data: a newline, a bracket, a pipe, a
- * control or format character, a bidi override, or a leading `#` must never
- * change the structure around it, and escaping stays linear in the input.
+ * print, `atLineStart()` keeps text that opens a line or list item from
+ * opening a block, and `callerEcho()` and `identifier()` echo a caller's own text
+ * and an identifier value with their `*`, `_`, and `~` left as written, so they
+ * copy back exactly. Upstream strings are data: a newline, a bracket,
+ * a pipe, an emphasis or strikethrough delimiter, a control or format character,
+ * a bidi override, or a leading `#` must never change the structure around it
+ * (an intraword `p_T` stays as written), and escaping stays linear in the input.
  * @module tests/shared/render.test
  */
 
 import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
-import { atLineStart, cell, fenced, inline, printUrl, quote } from '@/utils/render.js';
+import {
+  atLineStart,
+  callerEcho,
+  cell,
+  fenced,
+  identifier,
+  inline,
+  printUrl,
+  quote,
+} from '@/utils/render.js';
+import { measureGrowth } from '../fixtures/measure-growth.js';
 
 const chr = String.fromCharCode;
 
@@ -34,6 +47,13 @@ const LINE_BREAK = anyOf([0x0a, 0x0a], [0x0d, 0x0d], [0x85, 0x85], [0x2028, 0x20
 
 /** Format characters (`\p{Cf}`) other than ZWNJ and ZWJ, which every render function also strips. */
 const FORMAT = /(?![\u{200C}\u{200D}])\p{Cf}/u;
+
+/**
+ * A `<` CommonMark reads as the start of markup: a tag, comment, declaration, or
+ * processing instruction, a URI autolink (scheme opens with a letter), or an email
+ * autolink (local-part characters, then `@`).
+ */
+const MARKUP_OPENER = /<(?:[A-Za-z/!?]|[\w.!#$%&'*+/=?^`{|}~-]+@)/;
 
 const NUL = chr(0);
 const ESC = chr(0x1b);
@@ -168,8 +188,8 @@ describe('inline', () => {
     expect(inline('<https://evil.example>')).toBe('&lt;https://evil.example&gt;');
   });
 
-  it('does not escape pipes, ampersands, or LaTeX outside table cells', () => {
-    expect(inline('|V_{cb}| & $\\sigma$')).toBe('|V_{cb}| & $\\sigma$');
+  it('does not escape pipes, ampersands, or LaTeX backslashes outside table cells', () => {
+    expect(inline('|V_{cb}| & $\\sigma$')).toBe('|V\\_{cb}| & $\\sigma$');
   });
 
   it('doubles a backslash run before a bracket so it cannot cancel the escape', () => {
@@ -203,7 +223,7 @@ describe('inline', () => {
 
 describe('cell', () => {
   it('escapes pipes so an upstream |V_{cb}| cannot add a column', () => {
-    expect(cell('Determination of |V_{cb}|')).toBe('Determination of \\|V_{cb}\\|');
+    expect(cell('Determination of |V_{cb}|')).toBe('Determination of \\|V\\_{cb}\\|');
   });
 
   it('applies the inline rules too', () => {
@@ -477,42 +497,365 @@ describe('format characters', () => {
   });
 });
 
-describe('escaping cost', () => {
-  const RUN = '\\'.repeat(100_000);
+describe('emphasis delimiters', () => {
+  /**
+   * An `_` that could delimit emphasis: after an even, nonzero backslash run, or
+   * unescaped with a neighbor that is not a letter, digit, or combining mark.
+   */
+  const UNSAFE_UNDERSCORE =
+    /(?<!\\)(?:\\\\)+_|(?<![\\\p{L}\p{N}\p{M}])_|(?<!\\)_(?![\p{L}\p{N}\p{M}])/u;
 
   it.each([
+    [
+      'LaTeX subscripts on either side of a word',
+      'Nb$_{3}$Sn and Nb$_{3}$Sn',
+      'Nb$\\_{3}$Sn and Nb$\\_{3}$Sn',
+    ],
+    ['converted prescripts and postscripts', '_{61}^{131}Pm_{70}', '\\_{61}^{131}Pm\\_{70}'],
+    ['an underscore run', '__init__', '\\_\\_init\\_\\_'],
+    [
+      'asterisks in converted superscripts',
+      'S^*(E) near the D^{*0} threshold',
+      'S^\\*(E) near the D^{\\*0} threshold',
+    ],
+    ['markdown emphasis written out', '**bold** and *em*', '\\*\\*bold\\*\\* and \\*em\\*'],
+    ['an intraword asterisk', 'a*b*c', 'a\\*b\\*c'],
+  ])('escapes %s so they cannot pair into emphasis', (_name, text, expected) => {
+    expect(inline(text)).toBe(expected);
+    expect(quote(text)).toBe(`> ${expected}`);
+  });
+
+  it.each(['p_T', 'u_1', 'σ_γ', 'snake_case_name', 'x̄_y', '\\alpha_s'])(
+    'leaves the intraword underscore in %j unescaped',
+    (text) => {
+      expect(inline(text)).toBe(text);
+      expect(cell(text)).toBe(text);
+      expect(quote(text)).toBe(`> ${text}`);
+    },
+  );
+
+  it('escapes an underscore at either end of a word', () => {
+    expect(inline('_x x_ x_{y}')).toBe('\\_x x\\_ x\\_{y}');
+  });
+
+  it('doubles a backslash run before an underscore or asterisk so it cannot cancel the escape', () => {
+    expect(inline('a\\_b')).toBe('a\\\\\\_b');
+    expect(inline('a\\\\*b')).toBe('a\\\\\\\\\\*b');
+    expect(inline('\\*')).toBe('\\\\\\*');
+  });
+
+  it('escapes them in table cells alongside pipes', () => {
+    expect(cell('|V_{cb}| * 2')).toBe('\\|V\\_{cb}\\| \\* 2');
+  });
+
+  it('leaves fenced citation entries and printed URLs verbatim', () => {
+    expect(fenced('title = {Nb$_{3}$Sn *magnets*}', 'bibtex')).toBe(
+      '```bibtex\ntitle = {Nb$_{3}$Sn *magnets*}\n```',
+    );
+    expect(printUrl('https://example.org/a_b*c_')).toBe('https://example.org/a_b*c_');
+  });
+
+  it('keeps a leading asterisk or underscore run from opening a list or rule at line start', () => {
+    expect(atLineStart(inline('* item'))).toBe('\\* item');
+    expect(atLineStart(inline('___'))).toBe('\\_\\_\\_');
+  });
+
+  it('never leaves an asterisk unescaped or an underscore that could pair, whatever the text', () => {
+    const delimited = fc
+      .array(fc.oneof(nasty, fc.constantFrom('_', '*', '__', '**', 'p_T', 'x_{', '}_', 'σ_γ')), {
+        maxLength: 8,
+      })
+      .map((parts) => parts.join(''));
+    fc.assert(
+      fc.property(delimited, (text) => {
+        for (const out of [inline(text), cell(text), quote(text)]) {
+          expect(allEscaped(out, '*')).toBe(true);
+          expect(out).not.toMatch(UNSAFE_UNDERSCORE);
+        }
+      }),
+      { numRuns: 1_500 },
+    );
+  });
+});
+
+describe('strikethrough delimiters', () => {
+  it.each([
+    [
+      'LaTeX non-breaking spaces',
+      'between 2~mm and 0.6~mm, similar to',
+      'between 2\\~mm and 0.6\\~mm, similar to',
+    ],
+    ['approximation signs', 'a rate of ~10 Hz over ~3 s', 'a rate of \\~10 Hz over \\~3 s'],
+    ['a double-tilde run', '~~struck~~', '\\~\\~struck\\~\\~'],
+  ])(
+    'escapes the tildes in %s so they cannot pair into a strikethrough',
+    (_name, text, expected) => {
+      expect(inline(text)).toBe(expected);
+      expect(cell(text)).toBe(expected);
+      expect(quote(text)).toBe(`> ${expected}`);
+    },
+  );
+
+  it('doubles a backslash run before a tilde so it cannot cancel the escape', () => {
+    expect(inline('a\\~b')).toBe('a\\\\\\~b');
+    expect(quote('Fig.\\\\~1')).toBe('> Fig.\\\\\\\\\\~1');
+  });
+
+  it('leaves fenced citation entries and printed URLs verbatim', () => {
+    expect(fenced('note = {Fig.~1}', 'bibtex')).toBe('```bibtex\nnote = {Fig.~1}\n```');
+    expect(printUrl('https://example.org/~user/a~b')).toBe('https://example.org/~user/a~b');
+  });
+
+  it('keeps a tilde run from opening a code fence at line start', () => {
+    expect(atLineStart(inline('~~~ code'))).toBe('\\~\\~\\~ code');
+  });
+
+  it('never leaves a tilde unescaped, whatever the text', () => {
+    const tilded = fc
+      .array(fc.oneof(nasty, fc.constantFrom('~', '~~', '~~~', 'Fig.~1', '\\~')), { maxLength: 8 })
+      .map((parts) => parts.join(''));
+    fc.assert(
+      fc.property(tilded, (text) => {
+        for (const out of [inline(text), cell(text), quote(text)]) {
+          expect(allEscaped(out, '~')).toBe(true);
+        }
+      }),
+      { numRuns: 1_500 },
+    );
+  });
+});
+
+describe('callerEcho', () => {
+  it.each([
+    't higgs*',
+    'a Ellis*',
+    'refersto:recid:451647 and t D_s*',
+    'a J.Doe.1 or t ~1 TeV',
+    '__init__ *em* ~~x~~',
+  ])('leaves the query syntax in %j as written', (text) => {
+    expect(callerEcho(text)).toBe(text);
+  });
+
+  it('escapes square brackets so the echo cannot form a link', () => {
+    expect(callerEcho('[x](javascript:alert(1))')).toBe('\\[x\\](javascript:alert(1))');
+  });
+
+  it.each([
+    ['a tag', '<b>x</b>', '&lt;b>x&lt;/b>'],
+    ['an upper-case tag', '<B>', '&lt;B>'],
+    ['a closing tag', '</div>', '&lt;/div>'],
+    ['a comment', '<!-- c -->', '&lt;!-- c -->'],
+    ['a declaration', '<!DOCTYPE x>', '&lt;!DOCTYPE x>'],
+    ['a processing instruction', '<?php x ?>', '&lt;?php x ?>'],
+    ['a URI autolink', '<https://evil.example>', '&lt;https://evil.example>'],
+    ['an email autolink opening with a digit', '<1x@evil.example>', '&lt;1x@evil.example>'],
+    ['an email autolink opening with punctuation', '<_x.y@evil.example>', '&lt;_x.y@evil.example>'],
+  ])('entity-encodes the < that would open %s, and leaves > as written', (_label, text, out) => {
+    expect(callerEcho(text)).toBe(out);
+  });
+
+  it.each([
+    'P P --> TOP TOPBAR X',
+    'date > 2015',
+    '>',
+    'a -> b',
+    'date < 2015',
+    'date<2015',
+    'x <= 5 and y >= 2',
+    '0.8<|eta|<1.44',
+    '<2015 and >2010',
+    '<<',
+    '< b>',
+  ])('leaves %j as written: no < there can open markup', (text) => {
+    expect(callerEcho(text)).toBe(text);
+  });
+
+  it('flattens line breaks and strips control and format characters', () => {
+    expect(callerEcho('a\r\n# injected\nb')).toBe('a # injected b');
+    expect(callerEcho(`a${NUL}b${RLO}c${ZWSP}d\te${TAG_A}`)).toBe('abcd e');
+  });
+
+  it('doubles a backslash run before a bracket and leaves one before a wildcard as written', () => {
+    expect(callerEcho('a\\[b')).toBe('a\\\\\\[b');
+    expect(callerEcho('a\\*b\\_c')).toBe('a\\*b\\_c');
+  });
+
+  it('matches inline() on text with no asterisk, underscore, tilde, or angle bracket', () => {
+    fc.assert(
+      fc.property(
+        nasty.map((text) => text.replace(/[*_~<>]/g, '')),
+        (text) => {
+          expect(callerEcho(text)).toBe(inline(text));
+        },
+      ),
+      { numRuns: 1_500 },
+    );
+  });
+
+  it('keeps every asterisk, underscore, and tilde and stays inline-safe, whatever the text', () => {
+    const delimited = fc
+      .array(fc.oneof(nasty, fc.constantFrom('*', '_', '~', 'higgs*', 'p_T', '\\*')), {
+        maxLength: 8,
+      })
+      .map((parts) => parts.join(''));
+    const delimiters = (text: string) => text.match(/[*_~]/g)?.length ?? 0;
+    fc.assert(
+      fc.property(delimited, (text) => {
+        const out = callerEcho(text);
+        expect(delimiters(out)).toBe(delimiters(text));
+        expect(out).not.toMatch(LINE_BREAK);
+        expect(out).not.toMatch(STRIPPED);
+        expect(out).not.toMatch(FORMAT);
+        expect(out).not.toContain('\t');
+        expect(out).not.toMatch(MARKUP_OPENER);
+        expect(allEscaped(out, '[]')).toBe(true);
+      }),
+      { numRuns: 1_500 },
+    );
+  });
+
+  it('keeps every > and every < that opens no markup, and leaves none that does, whatever the text', () => {
+    const angled = fc
+      .array(
+        fc.oneof(
+          nasty,
+          fc.constantFrom('<', '>', '-->', '<b', '</', '<!', '<?', '<1@x.y>', ' < 2015', 'a'),
+        ),
+        { maxLength: 8 },
+      )
+      .map((parts) => parts.join(''));
+    const count = (text: string, part: string) => text.split(part).length - 1;
+    fc.assert(
+      fc.property(angled, (text) => {
+        const out = callerEcho(text);
+        expect(out).not.toMatch(MARKUP_OPENER);
+        expect(count(out, '>')).toBe(count(text, '>'));
+        expect(count(out, '<') + count(out, '&lt;')).toBe(count(text, '<') + count(text, '&lt;'));
+      }),
+      { numRuns: 1_500 },
+    );
+  });
+});
+
+describe('identifier', () => {
+  it.each([
+    'John_Ellis_(physicist,_born_1946)',
+    '_jdoe_',
+    '10.1016/S0370-2693(97)00146-4',
+    '10.1234/a_(1)_',
+    'ATL-PHYS-PUB-2020-*',
+    'Doe:2020_x~',
+    'hep-th/9901001',
+    'J.Doe.1',
+    '0000-0002-1825-0097',
+    'INSPIRE-00123456',
+  ])('leaves the identifier %j as written, so it copies back exactly', (text) => {
+    expect(identifier(text)).toBe(text);
+  });
+
+  it('escapes square brackets and entity-encodes a < that opens markup, so it cannot form a link or HTML', () => {
+    expect(identifier('[x](javascript:alert(1))')).toBe('\\[x\\](javascript:alert(1))');
+    expect(identifier('10.1002/<b>x</b>')).toBe('10.1002/&lt;b>x&lt;/b>');
+    expect(identifier('10.1002/(SICI)1097-4636(199601)30:1<1::AID-JBM1>3.0.CO;2-B')).toBe(
+      '10.1002/(SICI)1097-4636(199601)30:1<1::AID-JBM1>3.0.CO;2-B',
+    );
+    expect(identifier('a\r\n# injected')).toBe('a # injected');
+  });
+
+  it('renders every string exactly as callerEcho() does', () => {
+    fc.assert(
+      fc.property(nasty, (text) => {
+        expect(identifier(text)).toBe(callerEcho(text));
+      }),
+      { numRuns: 500 },
+    );
+  });
+});
+
+describe('escaping cost', () => {
+  /** Backslash runs of 12,500 and 100,000: a linear escape grows about 8×, a quadratic one about 64×. */
+  const SPAN = { small: 12_500, large: 100_000 };
+  const LIMITS = { maxRatio: 20, maxLargeMs: 50 };
+
+  it.for<{
+    name: string;
+    render: (text: string) => string;
+    after: string;
+    expected: (run: string) => string;
+  }>([
     {
       name: 'inline, a run before a plain character',
-      render: () => inline(`${RUN}x`),
-      expected: `${RUN}x`,
+      render: inline,
+      after: 'x',
+      expected: (run) => `${run}x`,
     },
-    { name: 'inline, a run at the end', render: () => inline(RUN), expected: RUN },
+    { name: 'inline, a run at the end', render: inline, after: '', expected: (run) => run },
     {
       name: 'inline, a run before a bracket',
-      render: () => inline(`${RUN}[`),
-      expected: `${RUN}${RUN}\\[`,
+      render: inline,
+      after: '[',
+      expected: (run) => `${run}${run}\\[`,
     },
     {
       name: 'cell, a run before a plain character',
-      render: () => cell(`${RUN}x`),
-      expected: `${RUN}x`,
+      render: cell,
+      after: 'x',
+      expected: (run) => `${run}x`,
     },
     {
       name: 'cell, a run before a pipe',
-      render: () => cell(`${RUN}|`),
-      expected: `${RUN}${RUN}\\|`,
+      render: cell,
+      after: '|',
+      expected: (run) => `${run}${run}\\|`,
     },
     {
       name: 'quote, a run before a plain character',
-      render: () => quote(`${RUN}x`),
-      expected: `> ${RUN}x`,
+      render: quote,
+      after: 'x',
+      expected: (run) => `> ${run}x`,
     },
-  ])('escapes a 100,000-backslash $name in linear time', ({ render, expected }) => {
-    const start = performance.now();
-    const out = render();
-    const elapsedMs = performance.now() - start;
+    {
+      name: 'inline, a run before an underscore',
+      render: inline,
+      after: '_',
+      expected: (run) => `${run}${run}\\_`,
+    },
+    {
+      name: 'quote, a run before an asterisk',
+      render: quote,
+      after: '*',
+      expected: (run) => `> ${run}${run}\\*`,
+    },
+    {
+      name: 'cell, a run before a tilde',
+      render: cell,
+      after: '~',
+      expected: (run) => `${run}${run}\\~`,
+    },
+    {
+      name: 'callerEcho, a run before a bracket',
+      render: callerEcho,
+      after: '[',
+      expected: (run) => `${run}${run}\\[`,
+    },
+    {
+      name: 'callerEcho, a run before a wildcard',
+      render: callerEcho,
+      after: '*',
+      expected: (run) => `${run}*`,
+    },
+  ])(
+    'escapes $name in linear time from 12,500 to 100,000 backslashes',
+    async ({ render, after, expected }, { annotate }) => {
+      const run = (length: number) => '\\'.repeat(length);
+      const large = `${run(SPAN.large)}${after}`;
+      expect(render(large)).toBe(expected(run(SPAN.large)));
 
-    expect(out).toBe(expected);
-    expect(elapsedMs).toBeLessThan(50);
-  });
+      const growth = measureGrowth(render, { small: `${run(SPAN.small)}${after}`, large }, LIMITS);
+      await annotate(growth.summary, 'cpu-time');
+
+      expect(growth.ratio, growth.summary).toBeLessThan(LIMITS.maxRatio);
+      expect(growth.largeMs, growth.summary).toBeLessThan(LIMITS.maxLargeMs);
+    },
+  );
 });
