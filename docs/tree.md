@@ -1,6 +1,6 @@
 # cern-inspire-mcp-server - Directory Structure
 
-Generated on: 2026-10-02 04:40:25
+Generated on: 2026-10-16 15:43:28
 
 ```text
 cern-inspire-mcp-server/
@@ -130,6 +130,7 @@ cern-inspire-mcp-server/
 │   ├── lint-mcp.ts
 │   ├── lint-packaging.ts
 │   ├── list-skills.ts
+│   ├── prune-musl-packages.ts
 │   ├── release-github.ts
 │   └── tree.ts
 ├── src/
@@ -167,6 +168,7 @@ cern-inspire-mcp-server/
 │   ├── fixtures/
 │   │   ├── active-service.ts
 │   │   ├── failure-suite.ts
+│   │   ├── inspire-authors.ts
 │   │   ├── inspire-markup.ts
 │   │   ├── inspire-upstream.ts
 │   │   ├── measure-growth.ts
@@ -183,12 +185,14 @@ cern-inspire-mcp-server/
 │   │   ├── identifiers.test.ts
 │   │   ├── inputs.test.ts
 │   │   ├── markup-to-text.test.ts
+│   │   ├── query-fields.test.ts
 │   │   └── render.test.ts
 │   └── tools/
 │       ├── export-citations.tool.test.ts
 │       ├── get-citation-summary.tool.test.ts
 │       ├── get-paper.tool.test.ts
 │       ├── list-reference.tool.test.ts
+│       ├── query-selection.tool.test.ts
 │       ├── search-authors.tool.test.ts
 │       ├── search-experiments.tool.test.ts
 │       ├── search-hepdata.tool.test.ts

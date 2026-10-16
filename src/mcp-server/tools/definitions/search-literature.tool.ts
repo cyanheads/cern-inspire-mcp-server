@@ -11,6 +11,7 @@ import {
   blankAsUnset,
   documentTypesInput,
   formatAppliedFilters,
+  hasEmptyQueryField,
   hasFacetFilters,
   subjectsInput,
   yearFromInput,
@@ -201,7 +202,7 @@ function renderHit(hit: LiteratureHitOutput, position: number): string[] {
 export const searchLiteratureTool = tool('cern_inspire_search_literature', {
   title: 'Search INSPIRE literature',
   description:
-    'Search INSPIRE-HEP papers with INSPIRE query syntax or free text, filtered by document type, subject, and year, sorted by relevance, recency, or citations. Returns one page of papers with recid, title, first author, date, citation counts, arXiv ID, DOI, publication, and an abstract snippet; pass a recid to cern_inspire_get_paper for the full record or to cern_inspire_export_citations ("recid:N") for BibTeX. INSPIRE never rejects malformed syntax: an unparsed operator widens or empties the match, so a very broad or empty result usually means the query needs fixing (cern_inspire_list_reference topic search_syntax). Only the first 10,000 results of a query are reachable.',
+    'Search INSPIRE-HEP papers with INSPIRE query syntax or free text, filtered by document type, subject, and year, sorted by relevance, recency, or citations. Returns one page of papers with recid, title, first author, date, citation counts, arXiv ID, DOI, publication, and an abstract snippet; pass a recid to cern_inspire_get_paper for the full record or to cern_inspire_export_citations ("recid:N") for BibTeX. Empty recognized field clauses are invalid; other malformed syntax can widen or empty the match, so check an unexpectedly broad or empty result against cern_inspire_list_reference topic search_syntax. Only the first 10,000 results of a query are reachable.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     query: z
@@ -210,7 +211,7 @@ export const searchLiteratureTool = tool('cern_inspire_search_literature', {
       .min(1)
       .max(1000)
       .describe(
-        'INSPIRE query syntax or free text. Common operators: "a Jane.Doe.1" or "a Doe, J" (author), "t higgs boson" (title words), "cn atlas" or "collaboration:atlas" (collaboration), "date > 2015", "topcite 500+" (cited 500+ times), "refersto:recid:451647" (papers citing a record), "citedby:recid:451647" (its references), "j Phys.Rev.Lett." (journal), "eprint 1207.7214"; combine with and/or/not. Bare words search all fields. INSPIRE does not reject malformed syntax; see cern_inspire_list_reference topic search_syntax for the rest.',
+        'INSPIRE query syntax or free text. Common operators: "a Jane.Doe.1" or "a Doe, J" (author), "t higgs boson" (title words), "cn atlas" or "collaboration:atlas" (collaboration), "date > 2015", "topcite 500+" (cited 500+ times), "refersto:recid:451647" (papers citing a record), "citedby:recid:451647" (its references), "j Phys.Rev.Lett." (journal), "eprint 1207.7214"; combine with and/or/not. Bare words search all fields. Empty recognized field clauses such as "a:" are invalid; other syntax is passed to INSPIRE without complete grammar validation. See cern_inspire_list_reference topic search_syntax.',
       ),
     sort: blankAsUnset(z.enum(SORTS).default('relevance')).describe(
       'Result order: relevance (default), mostrecent, or mostcited.',
@@ -274,9 +275,9 @@ export const searchLiteratureTool = tool('cern_inspire_search_literature', {
     {
       reason: 'invalid_query',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'INSPIRE answered 400 to a parameter value it refuses.',
+      when: 'A recognized field clause has no value, or INSPIRE answered 400 to a parameter value it refuses.',
       recovery:
-        'Check the query and filters against cern_inspire_list_reference topic search_syntax, then retry cern_inspire_search_literature with corrected values.',
+        'Give every field a value (for example "a Witten"), check cern_inspire_list_reference topic search_syntax, then retry cern_inspire_search_literature.',
       severity: 'notice',
       thrownBy: 'service',
     },
@@ -318,6 +319,13 @@ export const searchLiteratureTool = tool('cern_inspire_search_literature', {
     const appliedFilters = formatAppliedFilters({ sort: input.sort, ...filters });
     ctx.enrich({ truncated: false, shown: 0, cap: input.size, appliedFilters });
     ctx.enrich.total(0);
+
+    if (hasEmptyQueryField(input.query)) {
+      throw ctx.fail(
+        'invalid_query',
+        'A recognized INSPIRE field clause has no value; use "a Witten", for example.',
+      );
+    }
 
     if (
       input.year_from !== undefined &&

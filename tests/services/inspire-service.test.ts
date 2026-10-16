@@ -539,6 +539,21 @@ describe('getPaper', () => {
     h.route('/literature', jsonResponse(literaturePage([metadata])));
   const routeData = (body: unknown = dataPage()) => h.route('/data', jsonResponse(body));
 
+  it('slices after normalization and keeps identifiers and affiliations across pages', async () => {
+    const metadata = dossierMetadata(3, { author_count: 99 });
+    metadata.authors?.splice(1, 0, {});
+    routeRecord(metadata);
+    routeData();
+    const lookup = await h.service.getPaper(HIGGS.recid, 1, h.call(), { authorOffset: 1 });
+    expect(lookup).toMatchObject({
+      authorsInRecord: 3,
+      paper: { authorOffset: 1, nextAuthorOffset: 2, authorCount: 99 },
+    });
+    expect(lookup?.paper.authors[0]?.name).toBe('Doe, Jane 2');
+    expect(lookup?.paper.authors[0]?.affiliations).toEqual(['Example Institute']);
+    expect(h.requests).toHaveLength(2);
+  });
+
   it('reads a recid in two requests: the record and its HEPData availability', async () => {
     routeRecord();
     routeData();

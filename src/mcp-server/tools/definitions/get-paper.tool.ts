@@ -67,6 +67,19 @@ export const paperDossierSchema = z.object({
     .optional()
     .describe('Who supplied the abstract (e.g. arXiv, a publisher).'),
   authorCount: z.number().describe('Total number of authors on the paper.'),
+  authorOffset: z
+    .number()
+    .int()
+    .min(0)
+    .describe('Zero-based starting position in the normalized available author list.'),
+  nextAuthorOffset: z
+    .number()
+    .int()
+    .min(0)
+    .optional()
+    .describe(
+      'Pass as author_offset to read the next page; absent when no authors remain or the budget is zero.',
+    ),
   authors: z
     .array(
       z
@@ -91,7 +104,9 @@ export const paperDossierSchema = z.object({
         })
         .describe('One author.'),
     )
-    .describe('Authors in record order, capped at max_authors.'),
+    .describe(
+      'Authors in record order from authorOffset, capped at the effective max_authors budget.',
+    ),
   collaborations: z
     .array(z.string().describe('Collaboration name.'))
     .describe('Collaborations credited on the paper; empty for most non-collaboration papers.'),
@@ -381,6 +396,10 @@ function renderPaperDossier(paper: PaperDossierOutput): string {
   lines.push(
     '',
     `### Authors (${paper.authors.length} shown of ${paper.authorCount})`,
+    `**Author offset:** ${paper.authorOffset}${paper.authors.length > 0 ? ` · **Positions:** ${paper.authorOffset + 1}–${paper.authorOffset + paper.authors.length}` : ''}`,
+    ...(paper.nextAuthorOffset === undefined
+      ? []
+      : [`**Next author offset:** ${paper.nextAuthorOffset}`]),
     ...paper.authors.map(renderAuthor),
   );
   if (paper.keywords.length > 0) {
@@ -429,13 +448,20 @@ export const getPaperTool = tool('cern_inspire_get_paper', {
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     paper: paperInput,
-    max_authors: blankAsUnset(z.number().int().min(0).max(MAX_AUTHORS_LIMIT).default(25)).describe(
-      'Most authors to list (0–500, default 25). The full count is always in authorCount.',
+    max_authors: blankAsUnset(z.number().int().min(0).default(25)).describe(
+      'Most authors to list (nonnegative integer, default 25; values above 500 use 500). Zero lists no authors. The full count is always in authorCount.',
+    ),
+    author_offset: blankAsUnset(z.number().int().min(0).default(0)).describe(
+      'Zero-based starting position in the normalized author list (default 0). Use nextAuthorOffset from the previous page.',
     ),
   }),
   output: paperDossierSchema,
   enrichment: {
-    truncated: z.boolean().describe('True when the author list was capped at max_authors.'),
+    truncated: z
+      .boolean()
+      .describe(
+        'True when available authors remain after this page, including a zero-budget page.',
+      ),
     shown: z.number().describe('Number of authors listed.'),
     cap: z.number().describe('The max_authors cap applied.'),
     notice: z
@@ -483,10 +509,13 @@ export const getPaperTool = tool('cern_inspire_get_paper', {
   ],
 
   async handler(input, ctx) {
-    ctx.enrich({ truncated: false, shown: 0, cap: input.max_authors });
+    const cap = Math.min(input.max_authors, MAX_AUTHORS_LIMIT);
+    ctx.enrich({ truncated: false, shown: 0, cap });
 
     const inspire = getInspireService();
-    const lookup = await inspire.getPaper(input.paper, input.max_authors, inspire.beginCall(ctx));
+    const lookup = await inspire.getPaper(input.paper, cap, inspire.beginCall(ctx), {
+      authorOffset: input.author_offset,
+    });
     if (!lookup) {
       const record = hepdataRecordNumber(input.paper);
       if (record) {
@@ -510,17 +539,24 @@ export const getPaperTool = tool('cern_inspire_get_paper', {
     ctx.enrich({ shown });
 
     const notices: string[] = [];
+    if (input.max_authors > cap) {
+      notices.push(`Requested max_authors ${input.max_authors}; applied cap ${cap}.`);
+    }
     if (paper.mergedFrom) {
       notices.push(
         `INSPIRE merged recid ${identifier(paper.mergedFrom)} into recid ${paper.recid} and redirects the old recid here; cite and query this paper as recid:${paper.recid}.`,
       );
     }
-    const capped = authorsInRecord > input.max_authors;
+    const capped = input.author_offset + shown < authorsInRecord;
     if (capped) {
       notices.push(
-        input.max_authors < MAX_AUTHORS_LIMIT
-          ? `Showing ${shown} of ${authorsInRecord} authors; raise max_authors (up to ${MAX_AUTHORS_LIMIT}) to list more.`
-          : `Showing ${shown} of ${authorsInRecord} authors, the max_authors maximum; the other ${authorsInRecord - shown} are not listed. To check whether someone is on this paper, call cern_inspire_search_literature with query "recid:${paper.recid} and a BAI or NAME", which returns the paper when they are a listed author.`,
+        cap === 0
+          ? `No authors listed at author_offset ${input.author_offset}; request a positive max_authors budget to read the available authors.`
+          : `Showing positions ${input.author_offset + 1}–${input.author_offset + shown} of ${authorsInRecord} available authors; call cern_inspire_get_paper with paper "${paper.recid}", author_offset ${paper.nextAuthorOffset} and max_authors ${cap} to continue.${cap < MAX_AUTHORS_LIMIT ? ` You may also raise max_authors (up to ${MAX_AUTHORS_LIMIT}).` : ''}`,
+      );
+    } else if (input.author_offset > 0 && shown === 0) {
+      notices.push(
+        `Author list exhausted at author_offset ${input.author_offset}; ${authorsInRecord} authors are available in this record.`,
       );
     }
     if (paper.hepdata.status === 'lookup_failed') {
@@ -531,7 +567,7 @@ export const getPaperTool = tool('cern_inspire_get_paper', {
     const records = multiRecordNotice(paper, hepdataRecordCount);
     if (records) notices.push(records);
     if (capped) {
-      ctx.enrich.truncated({ shown, cap: input.max_authors, guidance: notices.join(' ') });
+      ctx.enrich.truncated({ shown, cap, guidance: notices.join(' ') });
     } else if (notices.length > 0) {
       ctx.enrich.notice(notices.join(' '));
     }

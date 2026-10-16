@@ -769,23 +769,24 @@ describe('format() parity', () => {
 });
 
 describe('declared error contracts', () => {
-  it('declares exactly the five reasons the design lists, with the tool name in the caller-input recoveries', () => {
+  it('declares the six reasons, with actionable caller-input recoveries', () => {
     const errors = exportCitationsTool.errors ?? [];
 
     expect(errors.map((e) => e.reason)).toEqual([
+      'invalid_year_range',
       'beyond_result_window',
       'invalid_query',
       'inspire_rate_limited',
       'pacer_shed',
       'upstream_unreadable',
     ]);
-    expect(errors[0]?.recovery).toBe(
+    expect(errors[1]?.recovery).toBe(
       'Narrow the query with tighter terms, such as a date range ("and date > 2015") or a collaboration, until it matches under 10,000 papers, then page again with cern_inspire_export_citations.',
     );
-    expect(errors[1]?.recovery).toBe(
-      'Check the query against cern_inspire_list_reference topic search_syntax, then retry cern_inspire_export_citations with the corrected query.',
+    expect(errors[2]?.recovery).toBe(
+      'Give every field a value (for example "a Witten"), check cern_inspire_list_reference topic search_syntax, then retry cern_inspire_export_citations.',
     );
-    for (const entry of errors.slice(0, 2)) {
+    for (const entry of errors.slice(0, 3)) {
       expect(entry).toMatchObject({ severity: 'notice', code: JsonRpcErrorCode.ValidationError });
     }
   });

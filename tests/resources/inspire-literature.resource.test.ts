@@ -166,6 +166,8 @@ describe('handler', () => {
 
     expect(paper.authors).toHaveLength(25);
     expect(paper.authorCount).toBe(2_932);
+    expect(paper.authorOffset).toBe(0);
+    expect(paper.nextAuthorOffset).toBe(25);
     expect(paper.authors[24]?.name).toBe('Doe, Jane 25');
   });
 
@@ -187,7 +189,7 @@ describe('handler', () => {
       truncated: true,
       shown: 25,
       cap: 25,
-      notice: 'Showing 25 of 40 authors; raise max_authors (up to 500) to list more.',
+      notice: `Showing positions 1–25 of 40 available authors; call cern_inspire_get_paper with paper "${HIGGS.recid}", author_offset 25 and max_authors 25 to continue. You may also raise max_authors (up to 500).`,
     });
     expect(paper).toEqual(tool);
   });

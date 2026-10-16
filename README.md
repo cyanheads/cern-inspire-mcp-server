@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.1.2-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/cern-inspire-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.1.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/cern-inspire-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/cern-inspire-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.1.2-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/cern-inspire-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.3.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/cern-inspire-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/cern-inspire-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.3-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -30,6 +30,8 @@
 ## Overview
 
 High-energy-physics literature from INSPIRE-HEP, including its index of HEPData measurement records. Search papers, authors, and experiments, read a paper's full record, compute citation summaries, h-indices, and citations per year, export BibTeX or LaTeX entries, and find the HEPData record that holds a paper's numerical tables. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
+
+Literature search, citation summaries, and citation export reject empty recognized field clauses (`a:` or `a: not`) as `invalid_query`; give each field a value (`a Witten`). Other syntax goes to INSPIRE without complete grammar validation.
 
 ### Tools
 
@@ -65,12 +67,14 @@ The same record is reachable through `cern_inspire_get_paper` for clients that d
 ### `cern_inspire_get_paper` <sub>tool</sub>
 
 - `paper` takes a recid, arXiv ID, DOI, inspirehep.net literature URL, or HEPData `ins<recid>` / hepdata.net `record/ins<recid>` URL; `resolvedAs` names the form that matched, and a miss fails as `paper_not_found`. A recid INSPIRE has merged into another record (older citations and HEPData `ins` links still carry such recids) returns the record INSPIRE redirects it to, with `mergedFrom` naming the recid asked for and a notice. A numbered hepdata.net record link, or a HEPData DOI no paper carries, names a HEPData record rather than a paper: its error gives the `cern_inspire_search_hepdata` query whose `paperRecids` reach the paper
-- `max_authors` 0–500 (default 25) caps the author list; `authorCount` always gives the full number
+- `max_authors` is a nonnegative integer (default 25); budgets above 500 use 500 with a notice. `author_offset` (default 0) pages through the available authors in record order; pass `nextAuthorOffset` to continue. `authorCount` retains INSPIRE's full count
 - `hepdata.status` is `available`, `none`, or `lookup_failed`, with `recordDoi`, `latestVersion`, `tableCount`, and `hepdataUrl` (the hepdata.net page of that record number) when available; a paper with more than one HEPData record lists the rest in `hepdata.otherRecords`, with a notice; `citingQuery` and `referencesQuery` feed `cern_inspire_search_literature`
 
 ---
 
 ### `cern_inspire_export_citations` <sub>tool</sub>
+
+- `document_types`, `subjects`, `year_from`, and `year_to` select the same set as literature search; multiple values AND together. `appliedFilters` echoes the selection on every page, including empty pages. Reversed years fail as `invalid_year_range` before any request
 
 - Any literature query (`recid:451647 or arxiv:1207.7214` for named papers); `format` is `bibtex` (default), `latex-eu`, or `latex-us`; `sort` as in search; `size` 1–50 (default 10) per page, paged by `page` up to the first 10,000 matches (beyond that, `beyond_result_window`)
 - Entries arrive verbatim from INSPIRE, each with its `texkey`; `truncated` is set when more matched papers follow the page, `nextPage` with it while the next page is within the 10,000-result window, and a page past the last returns no entries with a notice naming the last page
@@ -119,7 +123,7 @@ The same record is reachable through `cern_inspire_get_paper` for clients that d
 ### `inspire://literature/{recid}` <sub>resource</sub>
 
 - The `cern_inspire_get_paper` dossier as `application/json`, listing the first 25 authors
-- Takes a recid only; use the tool for arXiv IDs, DOIs, or a higher author cap. A merged recid serves the surviving record, with `mergedFrom`
+- Takes a recid only and returns the first 25 authors at `authorOffset:0`; use the tool for arXiv IDs, DOIs, or further author pages. A merged recid serves the surviving record, with `mergedFrom`
 
 ## Features
 

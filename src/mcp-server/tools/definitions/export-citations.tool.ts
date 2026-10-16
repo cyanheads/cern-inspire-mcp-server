@@ -7,7 +7,15 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { blankAsUnset } from '@/mcp-server/tools/inputs.js';
+import {
+  blankAsUnset,
+  documentTypesInput,
+  formatAppliedFilters,
+  hasEmptyQueryField,
+  subjectsInput,
+  yearFromInput,
+  yearToInput,
+} from '@/mcp-server/tools/inputs.js';
 import { getInspireService } from '@/services/inspire/inspire-service.js';
 import { callerEcho, fenced, identifier } from '@/utils/render.js';
 
@@ -32,11 +40,15 @@ export const exportCitationsTool = tool('cern_inspire_export_citations', {
       .min(1)
       .max(1000)
       .describe(
-        'Literature query selecting the papers to cite. Named papers: "recid:451647 or arxiv:1207.7214 or doi:10.1016/j.physletb.2012.08.020". Or any INSPIRE query: a topic ("t higgs and topcite 500+"), an author ("a Edward.Witten.1"), or the papers citing a record ("refersto:recid:451647"). See cern_inspire_list_reference topic search_syntax.',
+        'Literature query selecting the papers to cite, narrowed by the same document_types, subjects, year_from and year_to filters as search. Named papers: "recid:451647 or arxiv:1207.7214 or doi:10.1016/j.physletb.2012.08.020". Or a topic ("t higgs and topcite 500+"), an author ("a Edward.Witten.1"), or citing papers ("refersto:recid:451647"). Empty recognized field clauses such as "a:" are invalid; other syntax is passed through without complete grammar validation. See cern_inspire_list_reference topic search_syntax.',
       ),
     format: blankAsUnset(z.enum(FORMATS).default('bibtex')).describe(
       'Entry format: bibtex (default), latex-eu, or latex-us (\\bibitem entries in European or US style).',
     ),
+    document_types: documentTypesInput,
+    subjects: subjectsInput,
+    year_from: yearFromInput,
+    year_to: yearToInput,
     sort: blankAsUnset(z.enum(SORTS).default('relevance')).describe(
       'Entry order: relevance (default), mostrecent, or mostcited.',
     ),
@@ -68,6 +80,7 @@ export const exportCitationsTool = tool('cern_inspire_export_citations', {
       .describe('Citation entries, in the requested order.'),
   }),
   enrichment: {
+    appliedFilters: z.string().describe('Sort and filters applied, or "none".'),
     truncated: z.boolean().describe('True when more matched papers follow this page.'),
     shown: z.number().describe('Number of entries on this page.'),
     cap: z.number().describe('The page size applied.'),
@@ -85,9 +98,18 @@ export const exportCitationsTool = tool('cern_inspire_export_citations', {
       ),
   },
   enrichmentTrailer: {
+    appliedFilters: { label: 'Applied filters' },
     nextPage: { label: 'Next page' },
   },
   errors: [
+    {
+      reason: 'invalid_year_range',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'year_from is later than year_to.',
+      recovery:
+        'Swap year_from and year_to so the range runs forward, or drop one bound for an open range, then retry this call.',
+      severity: 'notice',
+    },
     {
       reason: 'beyond_result_window',
       code: JsonRpcErrorCode.ValidationError,
@@ -99,9 +121,9 @@ export const exportCitationsTool = tool('cern_inspire_export_citations', {
     {
       reason: 'invalid_query',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'INSPIRE answered 400 to a parameter value it refuses.',
+      when: 'A recognized field clause has no value, or INSPIRE answered 400 to a parameter value it refuses.',
       recovery:
-        'Check the query against cern_inspire_list_reference topic search_syntax, then retry cern_inspire_export_citations with the corrected query.',
+        'Give every field a value (for example "a Witten"), check cern_inspire_list_reference topic search_syntax, then retry cern_inspire_export_citations.',
       severity: 'notice',
       thrownBy: 'service',
     },
@@ -134,7 +156,35 @@ export const exportCitationsTool = tool('cern_inspire_export_citations', {
   ],
 
   async handler(input, ctx) {
-    ctx.enrich({ truncated: false, shown: 0, cap: input.size });
+    const filters = {
+      documentTypes: input.document_types,
+      subjects: input.subjects,
+      yearFrom: input.year_from,
+      yearTo: input.year_to,
+    };
+    ctx.enrich({
+      truncated: false,
+      shown: 0,
+      cap: input.size,
+      appliedFilters: formatAppliedFilters({ sort: input.sort, ...filters }),
+    });
+
+    if (hasEmptyQueryField(input.query)) {
+      throw ctx.fail(
+        'invalid_query',
+        'A recognized INSPIRE field clause has no value; use "a Witten", for example.',
+      );
+    }
+    if (
+      input.year_from !== undefined &&
+      input.year_to !== undefined &&
+      input.year_from > input.year_to
+    ) {
+      throw ctx.fail(
+        'invalid_year_range',
+        `year_from (${input.year_from}) is later than year_to (${input.year_to}).`,
+      );
+    }
 
     if (input.page * input.size > RESULT_WINDOW) {
       throw ctx.fail(
@@ -152,6 +202,7 @@ export const exportCitationsTool = tool('cern_inspire_export_citations', {
         sort: input.sort,
         page: input.page,
         size: input.size,
+        ...filters,
       },
       inspire.beginCall(ctx),
     );

@@ -183,7 +183,7 @@ const REFERENCE: Record<Topic, Entry[]> = {
     {
       term: 'malformed syntax',
       meaning:
-        'INSPIRE never rejects a query string: an unparsed operator widens or empties the match instead (a stray "a:" matched 1.5 M records). A very large total, or zero hits, usually means a syntax slip.',
+        'Empty recognized field clauses such as "a:", "a: and t higgs", or dangling "a: not" are invalid; supply a value, for example "a Witten". Quoted values, groups, and value negation such as "a: not Witten" are allowed. This is not complete grammar validation: INSPIRE can widen or empty the match for other malformed syntax. A very large total, or zero hits, can mean a syntax slip.',
     },
   ],
   identifiers: [
@@ -244,6 +244,12 @@ const REFERENCE: Record<Topic, Entry[]> = {
       meaning:
         "INSPIRE's citation key, used by the BibTeX and LaTeX entries of cern_inspire_export_citations.",
       example: 'ATLAS:2012yve',
+    },
+    {
+      term: 'author_offset / nextAuthorOffset',
+      meaning:
+        "Zero-based position in a paper's normalized available author list. Pass nextAuthorOffset to cern_inspire_get_paper as author_offset for the next bounded page; max_authors defaults to 25 and budgets above 500 use 500.",
+      example: 'paper:1124337, author_offset:500, max_authors:100',
     },
     {
       term: 'HEPData ins<recid>',

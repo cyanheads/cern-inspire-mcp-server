@@ -13,6 +13,7 @@ import {
   blankAsUnset,
   documentTypesInput,
   formatAppliedFilters,
+  hasEmptyQueryField,
   subjectsInput,
   yearFromInput,
   yearToInput,
@@ -104,7 +105,7 @@ export const getCitationSummaryTool = tool('cern_inspire_get_citation_summary', 
   input: z.object({
     author: authorIdInput,
     query: blankAsUnset(z.string().trim().max(1000).optional()).describe(
-      'An INSPIRE literature query, e.g. "collaboration:atlas", "t neutrino oscillation", "a Edward.Witten.1", or "affid:902725" for an institution\'s papers (CERN; affid takes the institution recid that cern_inspire_search_authors and cern_inspire_search_experiments return). Literature queries do not match ORCIDs; pass an ORCID as author. Pass this or author, not both.',
+      'An INSPIRE literature query, e.g. "collaboration:atlas", "t neutrino oscillation", "a Edward.Witten.1", or "affid:902725" for an institution\'s papers (CERN; affid takes the institution recid that cern_inspire_search_authors and cern_inspire_search_experiments return). Empty recognized field clauses such as "a:" are invalid; other syntax is passed through without complete grammar validation. Literature queries do not match ORCIDs; pass an ORCID as author. Pass this or author, not both.',
     ),
     document_types: documentTypesInput,
     subjects: subjectsInput,
@@ -220,9 +221,9 @@ export const getCitationSummaryTool = tool('cern_inspire_get_citation_summary', 
     {
       reason: 'invalid_query',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'INSPIRE answered 400 to a parameter value it refuses.',
+      when: 'A recognized field clause has no value, or INSPIRE answered 400 to a parameter value it refuses.',
       recovery:
-        'Check the query and filters against cern_inspire_list_reference topic search_syntax, then retry cern_inspire_get_citation_summary.',
+        'Give every field a value (for example "a Witten"), check cern_inspire_list_reference topic search_syntax, then retry cern_inspire_get_citation_summary.',
       severity: 'notice',
       thrownBy: 'service',
     },
@@ -268,6 +269,13 @@ export const getCitationSummaryTool = tool('cern_inspire_get_citation_summary', 
       }),
     });
     ctx.enrich.echo(input.query || input.author || '');
+
+    if (input.query && hasEmptyQueryField(input.query)) {
+      throw ctx.fail(
+        'invalid_query',
+        'A recognized INSPIRE field clause has no value; use "a Witten", for example.',
+      );
+    }
 
     if (
       input.year_from !== undefined &&

@@ -2,10 +2,10 @@
 
 **Server:** cern-inspire-mcp-server
 **Version:** 0.1.2
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.10`
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.15`
 **Engines:** Bun ≥1.4.0, Node ≥24.0.0
-**MCP SDK:** `@modelcontextprotocol/server` ^2.1.0
-**Zod:** ^4.6.5
+**MCP SDK:** `@modelcontextprotocol/server` ^2.3.1
+**Zod:** ^4.6.7
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
 
@@ -29,6 +29,8 @@ Eight read-only tools and one resource over INSPIRE-HEP's keyless REST API (`htt
 
 `cern_inspire_list_reference` serves static tables and makes no upstream call. There are no prompts.
 
+Literature search, citation summaries, and citation export reject empty standalone recognized field clauses before upstream I/O through the shared quote-aware `hasEmptyQueryField` guard, using `invalid_query`; value negation, groups, quoted text, metadata paths and nested colon selectors remain valid. This is not complete grammar validation. Citation export reuses search's facet/year inputs, AND semantics and `appliedFilters` echo; identical `facetParams` accompany its text page and later-page count lookup. Reversed year bounds fail as `invalid_year_range` before requests. Page 1 remains one size+1 request; later page/count requests remain parallel.
+
 `InspireService` (`src/services/inspire/inspire-service.ts`) owns every request: one process-wide pacer under INSPIRE's published 15 requests per 5 s per address (`limits: [{ requests: 12, perMs: 5_000 }]`, `maxConcurrent: 4`, a cooldown after a `429`), a series gate that lets at most two citations-by-year requests into that pacer at once (`maxConcurrent: 2`, since one holds a slot for up to 15 s), `withRetry` outside the pacer (2 retries), one 55 s budget per tool call opened by `beginCall(ctx)` and threaded through every request in the call, an 8 MiB byte ceiling through `fetchBounded` (`src/services/http/fetch-bounded.ts`), and a strict query-parameter allowlist, since INSPIRE silently ignores unknown parameters. There is no cache and no server-specific env var.
 
 Conventions every definition follows:
@@ -37,6 +39,7 @@ Conventions every definition follows:
 - **Honest User-Agent only.** `cern-inspire-mcp-server/<version> (+https://github.com/cyanheads/cern-inspire-mcp-server)`. Never add a `curl`, `Wget`, or `python-requests` token, and send nothing to hepdata.net.
 - **Never request `email_addresses`.** INSPIRE's terms bar collecting them in bulk; the author `fields` list leaves them out.
 - **Shared inputs** live in `src/mcp-server/tools/inputs.ts`: `blankAsUnset` wraps every optional or defaulted input; `paperInput`, `documentTypesInput` / `subjectsInput` (array or comma-joined string, case-folded, up to 4, values AND together), `yearFromInput` / `yearToInput`, `authorQueryInput` / `authorIdInput`, and the `formatAppliedFilters` echo. The advertised `inputSchema` must admit every spelling a description documents, and the input must parse it: `paperInput` checks its pattern in a `.refine()`, never `.regex()`, its description names the scheme on every URL form, and the facet descriptions document only the enum array (design § Design Decisions #31).
+- **Author paging.** `max_authors` accepts nonnegative integers (default/blank 25), clamped to 500 with a notice. `author_offset` is zero-based (default/blank 0) and slices the normalized available author list. Echo `authorOffset` and optional `nextAuthorOffset` on both surfaces; issue continuation only with positive progress and available authors remaining. Never derive continuation from `authorCount`; zero budget advises a positive budget. The resource remains first 25 at offset 0.
 - **Placeholders the server writes** in a notice, an `errors[]` recovery hint, or `format()` text outside a code span are uppercase words (`"t WORDS"`, `"a NAME"`, `collaborations.value:NAME`), never `<…>`, which a client rendering markdown to HTML drops as a tag. A code span prints `<…>` as written (list_reference's `HEPData ins<recid>` term), and `.describe()` text and the server instructions reach `tools/list` and `initialize`, not rendered markdown.
 - **Upstream text is data.** Every upstream or caller string in `format()` goes through `inline()`, `cell()`, `quote()`, `fenced()`, or `printUrl()` from `src/utils/render.ts`, and a list item that opens with one wraps it in `atLineStart()`; outside a `quote()` or `fenced()` block, no other line opens with upstream text. A caller's own query, author, or paper identifier echoed in a notice or error message goes through `callerEcho()`, which leaves `*`, `_`, `~`, and `>` as written so the echo can be sent back, and entity-encodes only a `<` that could open a tag, comment, or autolink; an identifier value a caller copies (DOI, record DOI, report number, texkey, arXiv ID, BAI, ORCID, INSPIRE ID, other ID) goes through `identifier()`, the same rules. `structuredContent` keeps each string as received with two exceptions: the service drops Unicode tag characters at decode, and `normalize.ts` converts titles and abstracts from publisher HTML/JATS/MathML to text with `markupToText()` (LaTeX left as published).
 - **Required enrichment first.** A handler writes its required enrichment fields (`truncated` / `shown` / `cap`, `totalCount`, the echo strings) with neutral values before its first upstream call or branch, then overwrites them where the real value is known.
@@ -95,13 +98,16 @@ export const getPaperTool = tool('cern_inspire_get_paper', {
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     paper: paperInput, // shared input: recid, arXiv ID, DOI, or URL forms, normalized in preprocess
-    max_authors: blankAsUnset(z.number().int().min(0).max(500).default(25)).describe(
-      'Most authors to list (0–500, default 25). The full count is always in authorCount.',
+    max_authors: blankAsUnset(z.number().int().min(0).default(25)).describe(
+      'Most authors to list (nonnegative integer, default 25; above 500 uses 500). The full count is always in authorCount.',
+    ),
+    author_offset: blankAsUnset(z.number().int().min(0).default(0)).describe(
+      'Zero-based position in the normalized available author list; use nextAuthorOffset to continue.',
     ),
   }),
   output: paperDossierSchema, // also the inspire://literature/{recid} resource's output
   enrichment: {
-    truncated: z.boolean().describe('True when the author list was capped at max_authors.'),
+    truncated: z.boolean().describe('True when available authors remain after this page.'),
     shown: z.number().describe('Number of authors listed.'),
     cap: z.number().describe('The max_authors cap applied.'),
     notice: z.string().optional().describe('Guidance when the author list was capped or HEPData availability could not be checked.'),
@@ -117,27 +123,8 @@ export const getPaperTool = tool('cern_inspire_get_paper', {
     // inspire_rate_limited, pacer_shed, upstream_unreadable: declared inline, thrownBy: 'service'
   ],
 
-  async handler(input, ctx) {
-    ctx.enrich({ truncated: false, shown: 0, cap: input.max_authors }); // required enrichment first
-
-    const inspire = getInspireService();
-    const lookup = await inspire.getPaper(input.paper, input.max_authors, inspire.beginCall(ctx));
-    if (!lookup) {
-      throw ctx.fail('paper_not_found', `No INSPIRE literature record matches "${inline(input.paper)}".`, {
-        paper: input.paper,
-      });
-    }
-    const { paper, authorsInRecord } = lookup;
-    ctx.enrich({ shown: paper.authors.length });
-    if (authorsInRecord > input.max_authors) {
-      ctx.enrich.truncated({
-        shown: paper.authors.length,
-        cap: input.max_authors,
-        guidance: `Showing ${paper.authors.length} of ${authorsInRecord} authors; raise max_authors (up to 500) to list more.`,
-      });
-    }
-    return paper;
-  },
+  // See get-paper.tool.ts for the handler: clamp the budget to 500, apply
+  // author_offset after normalization, and compose paging, merge and HEPData notices.
 
   // format() is the content[] twin of structuredContent: every output field renders,
   // and every upstream string passes through inline() / quote() / printUrl().
@@ -465,7 +452,7 @@ security: false                            # optional — true ONLY for a source
 
 ## Publishing
 
-**Every release goes through a release PR, straight-through** — `git-wrapup`'s "Release PR mode", mode `straight-through`. One run: `git-wrapup` lands the commit stack on `release/<version>`, pushes it, and opens the PR (title = the release commit subject, body = the changelog entry plus a gates section); `release-and-publish` then fast-forwards `main` locally with `git merge --ff-only`, creates the tag on `main`'s tip, pushes `main` and the tag, deletes the branch, and publishes. A caller's brief may run a given release as `gated` instead — a `release-pr-review` pass on the open PR before `release-and-publish`. **Never merge through the GitHub UI or `gh pr merge`**: squash and rebase-merge are disabled in the repo settings because both rewrite the stack (rebase-merge also strips the SSH signatures), and a merge commit breaks the linear history.
+**Every release goes through a release PR, straight-through** — `git-wrapup`'s "Release PR mode", mode `straight-through`. One run: `git-wrapup` lands the commit stack on `release/<version>`, pushes it, and opens the PR (title = the release commit subject, body = the release digest: theme line, `## Changes`, `## Gates`, changelog link last); `release-and-publish` then fast-forwards `main` locally with `git merge --ff-only`, creates the tag on `main`'s tip, pushes `main` and the tag, deletes the branch, and publishes. A caller's brief may run a given release as `gated` instead — a `release-pr-review` pass on the open PR before `release-and-publish`. **Never merge through the GitHub UI or `gh pr merge`**: squash and rebase-merge are disabled in the repo settings because both rewrite the stack (rebase-merge also strips the SSH signatures), and a merge commit breaks the linear history.
 
 ---
 

@@ -296,7 +296,8 @@ function toPublication(info: RawPublicationInfo): PaperPublication[] {
 }
 
 /**
- * The `get_paper` dossier, its author list capped at `maxAuthors`; `resolution`
+ * The `get_paper` dossier, its normalized author list paged from `authorOffset`
+ * with at most `maxAuthors` entries; `resolution`
  * names the identifier form the paper input took and, after a merged recid's
  * redirect, the recid asked for.
  */
@@ -306,12 +307,15 @@ export function toPaperLookup(
   resolution: Pick<PaperDossier, 'mergedFrom' | 'resolvedAs'>,
   hepdata: HepdataAvailability,
   maxAuthors: number,
+  authorOffset = 0,
 ): PaperLookup {
   const recid = recidOf(m.control_number, hitId);
   const [title = '', ...otherTitles] = titlesOf(m.titles);
   const abstract = pickAbstract(m.abstracts);
   const arxiv = m.arxiv_eprints?.find((e) => str(e.value));
   const authors = (m.authors ?? []).flatMap(toPaperAuthor);
+  const page = authors.slice(authorOffset, authorOffset + maxAuthors);
+  const nextOffset = authorOffset + page.length;
   return {
     authorsInRecord: authors.length,
     paper: {
@@ -322,7 +326,9 @@ export function toPaperLookup(
       alternateTitles: unique(otherTitles.filter((t) => t !== title)),
       ...(abstract ? { abstract: abstract.value, ...opt('abstractSource', abstract.source) } : {}),
       authorCount: num(m.author_count) ?? authors.length,
-      authors: authors.slice(0, maxAuthors),
+      authorOffset,
+      ...(page.length > 0 && nextOffset < authors.length ? { nextAuthorOffset: nextOffset } : {}),
+      authors: page,
       collaborations: values(m.collaborations),
       experiments: (m.accelerator_experiments ?? []).flatMap((e) => {
         const name = str(e.legacy_name);

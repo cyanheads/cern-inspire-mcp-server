@@ -581,7 +581,7 @@ export class InspireService {
     paper: string,
     maxAuthors: number,
     call: InspireCall,
-    options: { requireHepdata?: boolean } = {},
+    options: { requireHepdata?: boolean; authorOffset?: number } = {},
   ): Promise<PaperLookup | undefined> {
     const resolved = await this.resolvePaper(paper, call);
     if (!resolved) return;
@@ -609,11 +609,25 @@ export class InspireService {
         if (availability.status === 'rejected') {
           if (options.requireHepdata) throw availability.reason;
           const failed = this.degradeAvailability(availability.reason, recid, call);
-          return toPaperLookup(hit.metadata, hit.id, resolution, failed, maxAuthors);
+          return toPaperLookup(
+            hit.metadata,
+            hit.id,
+            resolution,
+            failed,
+            maxAuthors,
+            options.authorOffset,
+          );
         }
         const { availability: hepdata, recordCount } = availability.value;
         return {
-          ...toPaperLookup(hit.metadata, hit.id, resolution, hepdata, maxAuthors),
+          ...toPaperLookup(
+            hit.metadata,
+            hit.id,
+            resolution,
+            hepdata,
+            maxAuthors,
+            options.authorOffset,
+          ),
           hepdataRecordCount: recordCount,
         };
       }
@@ -714,7 +728,14 @@ export class InspireService {
       splitCitationEntries(
         await this.send(
           '/literature',
-          { q: params.query, sort: sortParam(params.sort), size, page, format: params.format },
+          {
+            q: params.query,
+            sort: sortParam(params.sort),
+            size,
+            page,
+            format: params.format,
+            ...facetParams(params),
+          },
           call,
           'exportCitations',
           parseExportText,
@@ -731,7 +752,7 @@ export class InspireService {
       exportPage(params.size, params.page),
       this.send(
         '/literature',
-        { q: params.query, fields: 'control_number', size: 1 },
+        { q: params.query, fields: 'control_number', size: 1, ...facetParams(params) },
         call,
         'exportCitationsTotal',
         parseSearchEnvelope<RawLiteratureMetadata>,

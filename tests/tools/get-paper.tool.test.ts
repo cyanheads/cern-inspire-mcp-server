@@ -10,7 +10,7 @@
  * @module tests/tools/get-paper.tool.test
  */
 
-import type { z } from '@cyanheads/mcp-ts-core';
+import { z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import {
   createMockContext,
@@ -25,6 +25,7 @@ import {
 } from '@/mcp-server/tools/definitions/get-paper.tool.js';
 import type { RawDataMetadata } from '@/services/inspire/types.js';
 import { describeFailureClasses } from '../fixtures/failure-suite.js';
+import { AUTHOR_PAGE_BOUNDARY } from '../fixtures/inspire-authors.js';
 import { MARKUP_AS_TEXT, MARKUP_FREE, PUBLISHER_MARKUP } from '../fixtures/inspire-markup.js';
 import {
   dataMetadata,
@@ -284,6 +285,139 @@ describe('the paper input', () => {
 });
 
 describe('max_authors and the author cap', () => {
+  it('does not invent continuation for an empty available list with a larger upstream count', async () => {
+    routeRecord(dossierMetadata(0, { author_count: 99 }));
+    routeData();
+    const result = await runRaw({ paper: HIGGS.recid, author_offset: 5, max_authors: 1000 });
+    const out = structured<Dossier>(result);
+    expect(out).toMatchObject({
+      authors: [],
+      authorCount: 99,
+      authorOffset: 5,
+      truncated: false,
+      shown: 0,
+      cap: 500,
+    });
+    expect(out).not.toHaveProperty('nextAuthorOffset');
+    expect(out.notice).toContain('Author list exhausted');
+    expect(fullText(result)).toContain(out.notice);
+  });
+  it('reaches captured author 501 with identifiers and affiliations intact on both surfaces', async () => {
+    const metadata = dossierMetadata(499, { author_count: 2932 });
+    metadata.authors?.push(...AUTHOR_PAGE_BOUNDARY);
+    routeRecord(metadata);
+    routeData();
+    const result = await runRaw({ paper: HIGGS.recid, author_offset: 500, max_authors: 1 });
+    const out = structured<Dossier>(result);
+    expect(out).toMatchObject({
+      authorOffset: 500,
+      nextAuthorOffset: 501,
+      authorCount: 2932,
+      truncated: true,
+    });
+    expect(out.authors).toEqual([
+      {
+        name: 'Cleland, Bill',
+        recid: '1013385',
+        bai: 'B.Cleland.1',
+        affiliations: ['Pittsburgh U.'],
+      },
+    ]);
+    for (const value of [
+      'Cleland, Bill',
+      'Pittsburgh U.',
+      '1013385',
+      'B.Cleland.1',
+      '**Positions:** 501–501',
+      '**Next author offset:** 501',
+    ])
+      expect(fullText(result)).toContain(value);
+  });
+  it('advertises nonnegative integer budgets without a maximum and a default-zero offset', () => {
+    const schema = z.toJSONSchema(getPaperTool.input, { io: 'input' });
+    expect(schema.properties?.max_authors).toMatchObject({ type: 'integer', minimum: 0 });
+    expect(schema.properties?.max_authors).toHaveProperty('maximum', Number.MAX_SAFE_INTEGER);
+    expect(schema.properties?.author_offset).toMatchObject({
+      type: 'integer',
+      minimum: 0,
+      default: 0,
+    });
+    expect(getPaperTool.input.safeParse({ paper: HIGGS.recid, max_authors: 10_000 }).success).toBe(
+      true,
+    );
+  });
+  it.each([501, 10_000])(
+    'clamps budget %i even for short records on both surfaces',
+    async (maxAuthors) => {
+      routeRecord(dossierMetadata(3));
+      routeData();
+      const result = await run({ paper: HIGGS.recid, max_authors: maxAuthors });
+      const out = structured<Dossier>(result);
+      expect(out).toMatchObject({ cap: 500, shown: 3, truncated: false });
+      expect(out.notice).toContain(`Requested max_authors ${maxAuthors}; applied cap 500.`);
+      expect(fullText(result)).toContain(out.notice);
+      expect(h.requests).toHaveLength(2);
+    },
+  );
+
+  it('pages normalized authors in order through last and exhausted slices', async () => {
+    const metadata = dossierMetadata(5, { author_count: 99 });
+    metadata.authors?.splice(1, 0, { affiliations: [{ value: 'Nameless' }] });
+    const names: string[] = [];
+    for (const offset of [0, 2, 4, 6]) {
+      h = startHarness();
+      routeRecord(metadata);
+      routeData();
+      const result = await runRaw({ paper: HIGGS.recid, max_authors: 2, author_offset: offset });
+      const out = structured<Dossier & { authorOffset: number; nextAuthorOffset?: number }>(result);
+      expect(out.authorOffset).toBe(offset);
+      expect(out.nextAuthorOffset).toBe(offset < 4 ? offset + 2 : undefined);
+      expect(out.truncated).toBe(offset < 4);
+      expect(fullText(result)).toContain(`**Author offset:** ${offset}`);
+      if (offset < 4) expect(fullText(result)).toContain(`**Next author offset:** ${offset + 2}`);
+      names.push(...out.authors.map((author) => author.name));
+      expect(h.requests).toHaveLength(2);
+    }
+    expect(names).toEqual(Array.from({ length: 5 }, (_, index) => `Doe, Jane ${index + 1}`));
+  });
+
+  it('keeps zero budget non-advancing and advises a positive budget', async () => {
+    routeRecord(dossierMetadata(3));
+    routeData();
+    const result = await runRaw({ paper: HIGGS.recid, max_authors: 0, author_offset: 1 });
+    const out = structured<Dossier>(result);
+    expect(out).toMatchObject({ authors: [], shown: 0, cap: 0, truncated: true, authorOffset: 1 });
+    expect(out).not.toHaveProperty('nextAuthorOffset');
+    expect(out.notice).toContain('positive max_authors');
+    expect(fullText(result)).toContain(out.notice);
+  });
+
+  it.each([-1, 1.5, '1', {}])(
+    'rejects invalid author_offset %s before requests',
+    async (offset) => {
+      const result = await runRaw({ paper: HIGGS.recid, author_offset: offset });
+      expect(errorEnvelope(result).code).toBe(JsonRpcErrorCode.InvalidParams);
+      expect(h.requests).toHaveLength(0);
+    },
+  );
+
+  it('reads a blank author_offset as zero', async () => {
+    routeRecord(dossierMetadata(1));
+    routeData();
+    expect(
+      structured<Dossier>(await runRaw({ paper: HIGGS.recid, author_offset: '' })),
+    ).toMatchObject({ authorOffset: 0, truncated: false });
+  });
+  it('characterizes normalized author order and count independently of nameless rows', async () => {
+    const metadata = dossierMetadata(3, { author_count: 99 });
+    metadata.authors?.splice(1, 0, { affiliations: [{ value: 'Nameless' }] });
+    routeRecord(metadata);
+    routeData();
+    const out = structured<Dossier>(await run({ paper: HIGGS.recid, max_authors: 2 }));
+    expect(out.authors.map((author) => author.name)).toEqual(['Doe, Jane 1', 'Doe, Jane 2']);
+    expect(out).toMatchObject({ authorCount: 99, shown: 2, truncated: true });
+    expect(h.requests).toHaveLength(2);
+  });
   it('lists 25 authors of a 2,932-author paper by default and says how many were cut', async () => {
     routeRecord(dossierMetadata(2_932));
     routeData();
@@ -299,13 +433,13 @@ describe('max_authors and the author cap', () => {
       truncated: true,
       shown: 25,
       cap: 25,
-      notice: 'Showing 25 of 2932 authors; raise max_authors (up to 500) to list more.',
+      nextAuthorOffset: 25,
     });
     const text = bodyText(result);
     expect(text).toContain('### Authors (25 shown of 2932)');
     expect(text.split('\n').filter((line) => line.startsWith('- **Doe, Jane '))).toHaveLength(25);
     expect(fullText(result)).toContain('**truncated:** true');
-    expect(fullText(result)).toContain('> Showing 25 of 2932 authors');
+    expect(fullText(result)).toContain('> Showing positions 1–25 of 2932 available authors');
   });
 
   it.each([
@@ -325,12 +459,14 @@ describe('max_authors and the author cap', () => {
       cap: maxAuthors,
       truncated: true,
     });
-    expect(out.notice).toBe(
-      `Showing ${listed} of 600 authors; raise max_authors (up to 500) to list more.`,
+    expect(out.notice).toContain(
+      listed === 0
+        ? 'positive max_authors'
+        : `author_offset ${listed} and max_authors ${maxAuthors} to continue`,
     );
   });
 
-  it('at the 500 maximum, routes a membership check to literature search instead of raising the cap', async () => {
+  it('at the 500 maximum, pages forward instead of raising the cap', async () => {
     routeRecord(dossierMetadata(2_932));
     routeData();
 
@@ -339,7 +475,7 @@ describe('max_authors and the author cap', () => {
     const out = structured<Dossier>(result);
     expect(out.authors).toHaveLength(500);
     expect(out).toMatchObject({ authorCount: 2_932, shown: 500, cap: 500, truncated: true });
-    const notice = `Showing 500 of 2932 authors, the max_authors maximum; the other 2432 are not listed. To check whether someone is on this paper, call cern_inspire_search_literature with query "recid:${HIGGS.recid} and a BAI or NAME", which returns the paper when they are a listed author.`;
+    const notice = `Showing positions 1–500 of 2932 available authors; call cern_inspire_get_paper with paper "${HIGGS.recid}", author_offset 500 and max_authors 500 to continue.`;
     expect(out.notice).toBe(notice);
     expect(out.notice).not.toContain('raise max_authors');
     expect(fullText(result)).toContain(notice);
@@ -355,8 +491,8 @@ describe('max_authors and the author cap', () => {
     expect(out).toMatchObject({ cap: 25, shown: 25, truncated: true });
   });
 
-  it.each([-1, 501, 2.5, 1_000])('rejects max_authors %s as InvalidParams', async (maxAuthors) => {
-    const result = await run({ paper: HIGGS.recid, max_authors: maxAuthors });
+  it.each([-1, 2.5, '500', {}])('rejects max_authors %s as InvalidParams', async (maxAuthors) => {
+    const result = await runRaw({ paper: HIGGS.recid, max_authors: maxAuthors });
 
     expect(errorEnvelope(result).code).toBe(JsonRpcErrorCode.InvalidParams);
     expect(h.requests).toHaveLength(0);
@@ -780,7 +916,7 @@ describe('papers with more than one HEPData record', () => {
     const out = structured<Dossier>(result);
     expect(out.truncated).toBe(true);
     expect(out.notice).toBe(
-      'Showing 25 of 30 authors; raise max_authors (up to 500) to list more. INSPIRE links 2 HEPData records to this paper: hepdata describes 10.17182/hepdata.98625, the lowest record number, and hepdata.otherRecords lists 10.17182/hepdata.156903.',
+      `Showing positions 1–25 of 30 available authors; call cern_inspire_get_paper with paper "${HIGGS.recid}", author_offset 25 and max_authors 25 to continue. You may also raise max_authors (up to 500). INSPIRE links 2 HEPData records to this paper: hepdata describes 10.17182/hepdata.98625, the lowest record number, and hepdata.otherRecords lists 10.17182/hepdata.156903.`,
     );
   });
 
@@ -848,7 +984,7 @@ describe('when the HEPData availability lookup fails', () => {
     const out = structured<Dossier>(result);
     expect(out.truncated).toBe(true);
     expect(out.notice).toBe(
-      `Showing 25 of 30 authors; raise max_authors (up to 500) to list more. HEPData availability could not be checked; retry cern_inspire_get_paper, or call cern_inspire_search_hepdata with query "literature.control_number:${HIGGS.recid}".`,
+      `Showing positions 1–25 of 30 available authors; call cern_inspire_get_paper with paper "${HIGGS.recid}", author_offset 25 and max_authors 25 to continue. You may also raise max_authors (up to 500). HEPData availability could not be checked; retry cern_inspire_get_paper, or call cern_inspire_search_hepdata with query "literature.control_number:${HIGGS.recid}".`,
     );
   });
 
@@ -1176,8 +1312,18 @@ describe('a recid INSPIRE merged into another record', () => {
 
     expect(out.truncated).toBe(true);
     expect(out.notice).toBe(
-      `${NOTICE} Showing 5 of 30 authors; raise max_authors (up to 500) to list more.`,
+      `${NOTICE} Showing positions 1–5 of 30 available authors; call cern_inspire_get_paper with paper "${SURVIVOR}", author_offset 5 and max_authors 5 to continue. You may also raise max_authors (up to 500).`,
     );
+  });
+
+  it('preserves merge guidance alongside a budget reduction on a later page', async () => {
+    routeMerged(600);
+    const result = await runRaw({ paper: MERGED, max_authors: 1000, author_offset: 500 });
+    const out = structured<Dossier>(result);
+    expect(out).toMatchObject({ authorOffset: 500, shown: 100, cap: 500, truncated: false });
+    expect(out.notice).toContain(NOTICE);
+    expect(out.notice).toContain('Requested max_authors 1000; applied cap 500.');
+    expect(fullText(result)).toContain(out.notice);
   });
 
   it('prints no merge note for a recid INSPIRE serves directly', async () => {

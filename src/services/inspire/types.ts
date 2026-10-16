@@ -192,7 +192,7 @@ export interface LiteratureSearchParams extends FacetFilters {
   sort: LiteratureSort;
 }
 
-export interface CitationExportParams {
+export interface CitationExportParams extends FacetFilters {
   format: CitationExportFormat;
   /** 1-based; page 1 asks for one entry more than `size` to detect truncation. */
   page: number;
@@ -296,7 +296,9 @@ export interface PaperDossier {
   arxivCategories: string[];
   arxivId?: string;
   authorCount: number;
-  /** Capped at the requested `maxAuthors`. */
+  /** Zero-based position in the normalized available author list. */
+  authorOffset: number;
+  /** A page capped at the effective `maxAuthors`. */
   authors: PaperAuthor[];
   citationCount: number;
   citationCountWithoutSelf?: number;
@@ -314,6 +316,8 @@ export interface PaperDossier {
   licenses: { imposing?: string; material?: string; url: string }[];
   /** The recid asked for, when INSPIRE had merged it into this record and redirected it here. */
   mergedFrom?: string;
+  /** Next position only when this page advances and more authors are available. */
+  nextAuthorOffset?: number;
   numberOfPages?: number;
   preprintDate?: string;
   publicationDate?: string;
@@ -330,7 +334,7 @@ export interface PaperDossier {
 }
 
 export interface PaperLookup {
-  /** Length of the record's downloaded author list, before the `maxAuthors` cap. */
+  /** Length of the normalized available author list, before paging. */
   authorsInRecord: number;
   /** INSPIRE's count of the paper's HEPData records; absent when the lookup failed. */
   hepdataRecordCount?: number;

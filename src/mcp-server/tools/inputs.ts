@@ -24,6 +24,63 @@ import { DOCUMENT_TYPES, SUBJECTS } from '@/services/inspire/vocabulary.js';
 export const blankAsUnset = <T extends z.ZodType>(schema: T) =>
   z.preprocess((value) => (value === '' ? undefined : value), schema);
 
+/** Known aliases from INSPIRE's query-parser keyword tables, not arbitrary metadata paths. */
+const QUERY_FIELDS = new Set(
+  (
+    'abstract address affiliation affil aff af institution inst affid affiliation-id author au a name ' +
+    'author-count authorcount ac cat caption cite c reference citedby citedbyexcludingselfcites citedbyx ' +
+    'citedexcludingselfcites cx collaboration cn cnum control_number recid country cc doi bb bull eprint arxiv ' +
+    'exact-author exactauthor ea experiment exp fc field-code first-author firstauthor fa fulltext ft irn ' +
+    'coden journal j published_in volume vol keyword keywords kw k primarch rawref citation jour-vol-page jvp ' +
+    'refersto referstoexcludingselfcites referstox reportnumber report-num report rept rn r subject title ti t ' +
+    'texkey cited topcit topcite type-code type tc ty scl ps collection date d year date-added dadd da ' +
+    'date-earliest de date-updated dupd du journal-year jy'
+  ).split(' '),
+);
+
+/**
+ * Finds an empty standalone recognized `field:` clause, ignoring quoted and regex values
+ * and embedded selectors. This is a linear scan, not a complete query parser:
+ * value negation, groups, unknown fields and nested colon values pass through.
+ */
+export function hasEmptyQueryField(query: string): boolean {
+  const tokens: string[] = [];
+  let start = 0;
+  let firstColon = -1;
+  for (let i = 0; i < query.length; i++) {
+    const char = query.charAt(i);
+    if (char === '"' || char === "'" || (char === '/' && (i === start || query[i - 1] === ':'))) {
+      const quote = char;
+      for (i++; i < query.length; i++) {
+        if (query[i] === '\\') i++;
+        else if (query[i] === quote) break;
+      }
+    } else if (char === '(' || char === ')' || /\s/.test(char)) {
+      // A nonempty colon-bearing token (DOI, URL, nested selector) is opaque.
+      if ((char === '(' || char === ')') && firstColon >= start && firstColon < i - 1) continue;
+      if (start < i) tokens.push(query.slice(start, i).toLowerCase());
+      if (char === '(' || char === ')') tokens.push(char);
+      start = i + 1;
+    } else if (char === ':' && firstColon < start) {
+      firstColon = i;
+    }
+  }
+  if (start < query.length) tokens.push(query.slice(start).toLowerCase());
+  for (const [i, token] of tokens.entries()) {
+    if (!token.endsWith(':') || !QUERY_FIELDS.has(token.slice(0, -1))) continue;
+    let next = i + 1;
+    while (tokens[next] === '(' || tokens[next] === 'not') next++;
+    if (
+      next === tokens.length ||
+      tokens[next] === ')' ||
+      tokens[next] === 'and' ||
+      tokens[next] === 'or'
+    )
+      return true;
+  }
+  return false;
+}
+
 /**
  * The call that leads from HEPData record `n` to its paper: the HEPData search
  * matches the record DOI and returns the record's paper recids.

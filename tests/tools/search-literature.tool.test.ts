@@ -710,13 +710,13 @@ describe('broad-match notice', () => {
   it('stays silent at exactly 100,000 matches', async () => {
     routePage(pageOf(3, { total: 100_000 }));
 
-    expect(structured<Output>(await run({ query: 'a:' })).notice).toBeUndefined();
+    expect(structured<Output>(await run({ query: 'de > 2020-13-45' })).notice).toBeUndefined();
   });
 
   it('warns above 100,000 matches, naming the total and the syntax reference', async () => {
     routePage(pageOf(3, { total: 100_001 }));
 
-    const result = await run({ query: 'a:' });
+    const result = await run({ query: 'de > 2020-13-45' });
 
     const out = structured<Output>(result);
     expect(out.notice).toBe(
@@ -729,7 +729,7 @@ describe('broad-match notice', () => {
   it('puts the next-page line first when a broad match is also paged', async () => {
     routePage(pageOf(10, { next: true, total: 1_500_000 }));
 
-    const out = structured<Output>(await run({ query: 'a:' }));
+    const out = structured<Output>(await run({ query: 'de > 2020-13-45' }));
 
     expect(out.truncated).toBe(true);
     expect(out.nextPage).toBe(2);
@@ -743,7 +743,7 @@ describe('broad-match notice', () => {
   it('keeps the broad-match line when the window blocks the next page', async () => {
     routePage(pageOf(100, { next: true, total: 1_500_000 }));
 
-    const out = structured<Output>(await run({ query: 'a:', page: 100, size: 100 }));
+    const out = structured<Output>(await run({ query: 'de > 2020-13-45', page: 100, size: 100 }));
 
     expect(out.nextPage).toBeUndefined();
     expect(out.notice).toContain('INSPIRE serves only the first 10,000');
