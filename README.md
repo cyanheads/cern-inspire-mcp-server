@@ -29,9 +29,7 @@
 
 ## Overview
 
-High-energy-physics literature from INSPIRE-HEP, including its index of HEPData measurement records. Search papers, authors, and experiments, read a paper's full record, compute citation summaries, h-indices, and citations per year, export BibTeX or LaTeX entries, and find the HEPData record that holds a paper's numerical tables. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
-
-Literature search, citation summaries, and citation export reject empty recognized field clauses (`a:` or `a: not`) as `invalid_query`; give each field a value (`a Witten`). Other syntax goes to INSPIRE without complete grammar validation.
+High-energy-physics literature from INSPIRE-HEP and the HEPData tables behind it. Search papers, authors, and experiments, compute citation summaries and h-indices, export BibTeX or LaTeX, and find the record holding a paper's numerical data.
 
 ### Tools
 
@@ -66,18 +64,17 @@ The same record is reachable through `cern_inspire_get_paper` for clients that d
 
 ### `cern_inspire_get_paper` <sub>tool</sub>
 
-- `paper` takes a recid, arXiv ID, DOI, inspirehep.net literature URL, or HEPData `ins<recid>` / hepdata.net `record/ins<recid>` URL; `resolvedAs` names the form that matched, and a miss fails as `paper_not_found`. A recid INSPIRE has merged into another record (older citations and HEPData `ins` links still carry such recids) returns the record INSPIRE redirects it to, with `mergedFrom` naming the recid asked for and a notice. A numbered hepdata.net record link, or a HEPData DOI no paper carries, names a HEPData record rather than a paper: its error gives the `cern_inspire_search_hepdata` query whose `paperRecids` reach the paper
-- `max_authors` is a nonnegative integer (default 25); budgets above 500 use 500 with a notice. `author_offset` (default 0) pages through the available authors in record order; pass `nextAuthorOffset` to continue. `authorCount` retains INSPIRE's full count
-- `hepdata.status` is `available`, `none`, or `lookup_failed`, with `recordDoi`, `latestVersion`, `tableCount`, and `hepdataUrl` (the hepdata.net page of that record number) when available; a paper with more than one HEPData record lists the rest in `hepdata.otherRecords`, with a notice; `citingQuery` and `referencesQuery` feed `cern_inspire_search_literature`
+- `paper` takes a recid, arXiv ID, DOI, inspirehep.net literature URL, or HEPData `ins<recid>` / hepdata.net `record/ins<recid>` URL; `resolvedAs` names the form that matched, and a miss fails as `paper_not_found`. A merged recid returns the surviving record, with `mergedFrom` naming the recid asked for
+- `max_authors` (default 25, capped at 500) and `author_offset` (default 0) page through authors; pass `nextAuthorOffset` to continue. `authorCount` is INSPIRE's full count
+- `hepdata.status` is `available`, `none`, or `lookup_failed`, with `recordDoi`, `latestVersion`, `tableCount`, and `hepdataUrl` when available; extra HEPData records appear in `hepdata.otherRecords`. `citingQuery` and `referencesQuery` feed `cern_inspire_search_literature`
 
 ---
 
 ### `cern_inspire_export_citations` <sub>tool</sub>
 
-- `document_types`, `subjects`, `year_from`, and `year_to` select the same set as literature search; multiple values AND together. `appliedFilters` echoes the selection on every page, including empty pages. Reversed years fail as `invalid_year_range` before any request
-
-- Any literature query (`recid:451647 or arxiv:1207.7214` for named papers); `format` is `bibtex` (default), `latex-eu`, or `latex-us`; `sort` as in search; `size` 1–50 (default 10) per page, paged by `page` up to the first 10,000 matches (beyond that, `beyond_result_window`)
-- Entries arrive verbatim from INSPIRE, each with its `texkey`; `truncated` is set when more matched papers follow the page, `nextPage` with it while the next page is within the 10,000-result window, and a page past the last returns no entries with a notice naming the last page
+- Any literature query (`recid:451647 or arxiv:1207.7214` for named papers), with the same `document_types`, `subjects`, `year_from`, `year_to`, and `sort` as search; reversed years fail as `invalid_year_range`
+- `format` is `bibtex` (default), `latex-eu`, or `latex-us`; `size` 1–50 (default 10), paged by `page` within the first 10,000 matches (beyond that, `beyond_result_window`)
+- Entries arrive verbatim from INSPIRE, each with its `texkey`; `truncated` and `nextPage` signal more results, and `appliedFilters` echoes the selection
 
 ---
 
@@ -92,10 +89,9 @@ The same record is reachable through `cern_inspire_get_paper` for clients that d
 ### `cern_inspire_get_citation_summary` <sub>tool</sub>
 
 - Exactly one of `author` (BAI, ORCID, INSPIRE ID, or author recid) or `query` (any literature query, such as `affid:902725` for an institution's papers); otherwise `missing_target`, and a name passed as `author` fails as `author_not_identifier`
-- `document_types` and `subjects` narrow every figure; `year_from` / `year_to` narrow the summary, and `exclude_self_citations` drops self-citations from it
-- h-index, citation totals and averages, and paper counts in the buckets `0`, `1–9`, `10–49`, `50–99`, `100–249`, `250–499`, `500+`, each for all citeable and for published papers
-- `citationsByYear`: citations received per year (the citing record's year, self-citations included, every matched record), ascending, with no row for a year without citations; left out, with a notice, under `year_from`, `year_to`, or `exclude_self_citations`, which INSPIRE's per-year series cannot apply, when INSPIRE does not return it, and for a query matching more than about 150,000 records, which INSPIRE cannot count in time, unless INSPIRE answers within about 2 s (a series it has cached); the call then returns in about 2 s
-- An unfiltered call spends two of the pacer's request starts (three with `author`, which is resolved first); with `year_from`, `year_to`, or `exclude_self_citations` set, one (two). The per-year request holds one of the pacer's four in-flight slots for as long as INSPIRE takes (up to 15 s), so at most two per-year series run at once and other calls keep at least two slots
+- Narrow with `document_types`, `subjects`, `year_from`, `year_to`, and `exclude_self_citations`
+- Returns h-index, citation totals and averages, and paper counts in the buckets `0`, `1–9`, `10–49`, `50–99`, `100–249`, `250–499`, `500+`, each for all citeable and for published papers
+- `citationsByYear` is omitted, with a notice, when `year_from`, `year_to`, or `exclude_self_citations` is set, when INSPIRE does not return it, or for queries matching more than about 150,000 records
 
 ---
 
@@ -122,8 +118,8 @@ The same record is reachable through `cern_inspire_get_paper` for clients that d
 
 ### `inspire://literature/{recid}` <sub>resource</sub>
 
-- The `cern_inspire_get_paper` dossier as `application/json`, listing the first 25 authors
-- Takes a recid only and returns the first 25 authors at `authorOffset:0`; use the tool for arXiv IDs, DOIs, or further author pages. A merged recid serves the surviving record, with `mergedFrom`
+- The `cern_inspire_get_paper` dossier as `application/json`, with the first 25 authors
+- Takes a recid only; use the tool for arXiv IDs, DOIs, or further author pages. A merged recid serves the surviving record, with `mergedFrom`
 
 ## Features
 
@@ -131,10 +127,10 @@ Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core): s
 
 INSPIRE-specific:
 
-- One process-wide pacer under INSPIRE's published limit of 15 requests per 5 s: 12 request starts per 5 s, at most 4 in flight (no more than 2 of them slow citations-per-year requests), and a shared cooldown after a 429 that starts at 5 s and doubles on each consecutive 429, up to 30 s
-- One 55 s budget per tool call covers queue wait, up to 2 retries, and every request the call makes; a request that can't start in time fails at once as `pacer_shed` with a `retryAfter`
-- Requests select only the fields a tool returns, under an 8 MiB response ceiling; author email addresses are never requested
-- Forgiving inputs: paper identifiers accept `arXiv:` / `doi:` prefixes, version suffixes, arxiv.org, doi.org, or inspirehep.net URLs, and HEPData's `ins<recid>`, a recid INSPIRE has merged away is followed to the surviving record, and every documented spelling passes a client's validation against the advertised schema; author identifiers accept an orcid.org URL
+- Paces requests to 12 per 5 s, under INSPIRE's limit of 15, with a cooldown after a 429; a call that can't start in time fails as `pacer_shed` with a `retryAfter`
+- 55 s budget per tool call, including queue wait and up to 2 retries
+- Requests select only the fields a tool returns; author email addresses are never requested
+- Forgiving inputs: paper identifiers accept `arXiv:` / `doi:` prefixes, version suffixes, and arxiv.org, doi.org, or inspirehep.net URLs; author identifiers accept an orcid.org URL
 
 Agent-friendly output:
 
@@ -142,7 +138,7 @@ Agent-friendly output:
 - Query echo and paging state: `totalCount`, `truncated` / `shown` / `cap`, `nextPage`, `appliedFilters`, and `effectiveQuery`, plus a `notice` with next-step text on empty, capped, or suspiciously broad results
 - Discriminated fields: `hepdata.status`, `resolvedAs`, `matchedAs`, and `target.kind` let callers branch on data; typed failure reasons (`paper_not_found`, `author_not_found`, `beyond_result_window`, `inspire_rate_limited`) each carry a recovery hint
 - No fabrication: a field INSPIRE leaves out stays absent and prints as "Not available" or "not recorded"
-- Titles and abstracts as text: publisher HTML, JATS, and MathML become plain text (`σ_γ`, `^{23}Na(n,γ)`) on every tool that returns titles or abstracts and on the resource, with LaTeX left as published; citation export entries stay verbatim, and other upstream strings reach `structuredContent` as INSPIRE sends them, less any invisible Unicode tag characters, which are dropped. The text output escapes them all, leaving identifiers such as DOIs and texkeys copyable as written
+- Titles and abstracts as text: publisher HTML, JATS, and MathML become plain text (`σ_γ`, `^{23}Na(n,γ)`), with LaTeX left as published and citation export entries verbatim
 
 ## Data and licensing
 
@@ -153,7 +149,7 @@ Agent-friendly output:
 ## Known limitations
 
 - **No HEPData table values.** hepdata.net's bot challenge refuses the server's User-Agent, so the server never calls it. `cern_inspire_get_paper` and `cern_inspire_search_hepdata` return the record DOI and the hepdata.net page where the values are read.
-- **Malformed INSPIRE syntax doesn't fail.** An unparsed operator widens or empties the match; zero hits or a very large `totalCount` usually means a syntax slip (`cern_inspire_list_reference` topic `search_syntax`).
+- **Malformed INSPIRE syntax mostly doesn't fail.** Literature search, citation summaries, and citation export reject only empty field clauses (`a:` or `a: not`) as `invalid_query`; give each field a value (`a Witten`). Otherwise an unparsed operator widens or empties the match; zero hits or a very large `totalCount` usually means a syntax slip (`cern_inspire_list_reference` topic `search_syntax`).
 - **10,000-result window.** Only the first 10,000 results of a query are reachable; narrow the query to reach the rest.
 - **Shared request queue.** All callers of one server process share one queue under INSPIRE's 15 requests per 5 s per address, so a burst can delay or shed other calls with a retryable rate-limit error.
 
