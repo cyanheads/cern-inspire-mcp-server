@@ -1,6 +1,6 @@
 # cern-inspire-mcp-server - Directory Structure
 
-Generated on: 2026-10-16 15:43:28
+Generated on: 2026-10-26 17:55:04
 
 ```text
 cern-inspire-mcp-server/
@@ -36,6 +36,8 @@ cern-inspire-mcp-server/
 │   ├── add-resource/
 │   │   └── SKILL.md
 │   ├── add-service/
+│   │   └── SKILL.md
+│   ├── add-skill/
 │   │   └── SKILL.md
 │   ├── add-test/
 │   │   └── SKILL.md
@@ -133,6 +135,9 @@ cern-inspire-mcp-server/
 │   ├── prune-musl-packages.ts
 │   ├── release-github.ts
 │   └── tree.ts
+├── skills/
+│   └── cern-inspire-guide/
+│       └── SKILL.md
 ├── src/
 │   ├── mcp-server/
 │   │   ├── resources/
@@ -169,6 +174,7 @@ cern-inspire-mcp-server/
 │   │   ├── active-service.ts
 │   │   ├── failure-suite.ts
 │   │   ├── inspire-authors.ts
+│   │   ├── inspire-documents.ts
 │   │   ├── inspire-markup.ts
 │   │   ├── inspire-upstream.ts
 │   │   ├── measure-growth.ts
@@ -176,7 +182,10 @@ cern-inspire-mcp-server/
 │   │   └── tool-result.ts
 │   ├── resources/
 │   │   └── inspire-literature.resource.test.ts
+│   ├── scripts/
+│   │   └── clean-mcpb.test.ts
 │   ├── services/
+│   │   ├── dossier-metadata.test.ts
 │   │   ├── fetch-bounded.test.ts
 │   │   ├── inspire-service-lifecycle.test.ts
 │   │   ├── inspire-service-transport.test.ts
@@ -212,7 +221,9 @@ cern-inspire-mcp-server/
 ├── Dockerfile
 ├── LICENSE
 ├── manifest.json
+├── mcp.json
 ├── package.json
+├── plugin.json
 ├── README.md
 ├── server.json
 ├── tsconfig.build.json
