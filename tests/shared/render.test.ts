@@ -18,6 +18,7 @@ import {
   atLineStart,
   callerEcho,
   cell,
+  errorText,
   fenced,
   identifier,
   inline,
@@ -129,6 +130,28 @@ const nasty = fc
     { maxLength: 12 },
   )
   .map((parts) => parts.join(''));
+
+describe('errorText', () => {
+  it('normalizes message controls without escaping Markdown or HTML', () => {
+    expect(
+      errorText(`[x](https://e) <b> * _ ~ \\ ${NUL}${RLO}${ZWSP}${TAG_A}\t\r\n${NEL}${LS}${PS}end`),
+    ).toBe('[x](https://e) <b> * _ ~ \\      end');
+    expect(errorText(`نامه${ZWNJ}ها क्${ZWJ}ष`)).toBe(`نامه${ZWNJ}ها क्${ZWJ}ष`);
+  });
+
+  it('never leaves a line break, control, or stripped format character', () => {
+    fc.assert(
+      fc.property(nasty, (text) => {
+        const out = errorText(text);
+        expect(out).not.toMatch(LINE_BREAK);
+        expect(out).not.toMatch(STRIPPED);
+        expect(out).not.toMatch(FORMAT);
+        expect(out).not.toContain('\t');
+      }),
+      { numRuns: 1_500 },
+    );
+  });
+});
 
 describe('inline', () => {
   it('leaves plain text untouched', () => {

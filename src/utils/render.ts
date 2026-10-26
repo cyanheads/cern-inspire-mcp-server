@@ -5,13 +5,13 @@
  * strikethrough, HTML, control, and invisible format characters neutralized;
  * text that opens a line or list item cannot open a block; free text is
  * blockquoted; citation entries are fenced. A caller's own text echoed in a
- * notice or error message goes through `callerEcho()`, and an identifier value
+ * notice goes through `callerEcho()`, and an identifier value
  * (DOI, texkey, BAI, …) through `identifier()`; both leave `*`, `_`, `~`, `>`,
  * and a `<` that opens no markup as written so the text copies back. The domain
  * fields of `structuredContent` never pass through here: they hold what the
  * service normalized (titles and abstracts converted from publisher markup to
  * text, other strings as decoded).
- * The service also uses `inline()` for upstream text it puts in an error message.
+ * Error messages use `errorText()` for control hygiene; the framework escapes their Markdown.
  * @module utils/render
  */
 
@@ -110,9 +110,14 @@ export function inline(text: string): string {
   return neutralize(text.replace(LINE_BREAK, ' '));
 }
 
+/** One-line error text with control/format characters stripped; Markdown escaping belongs to the framework error boundary. */
+export function errorText(text: string): string {
+  return text.replace(LINE_BREAK, ' ').replace(STRIPPED, '').replace(/\t/g, ' ');
+}
+
 /**
- * A caller's own query, author, or paper identifier echoed in a notice or error
- * message. Those strings ride `structuredContent` as well as `content[]`, and a
+ * A caller's own query, author, or paper identifier echoed in a notice.
+ * Those strings ride `structuredContent` as well as `content[]`, and a
  * caller may send the echo back as its next query, so INSPIRE's `*` wildcard,
  * `_`, `~`, and the `>` of `date > 2015` or `P P --> TOP TOPBAR X` are left as
  * written. Line breaks become one space, control and format characters are

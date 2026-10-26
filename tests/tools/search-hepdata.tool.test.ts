@@ -99,6 +99,86 @@ const errors = searchHepdataTool.errors ?? [];
 const hint = (reason: string) => errors.find((e) => e.reason === reason)?.recovery;
 
 describe('input', () => {
+  it('advertises budgets above the result ceiling', () => {
+    const schema = searchHepdataTool.input.toJSONSchema({ io: 'input' });
+    const budget = schema.properties?.size;
+    expect(budget).toMatchObject({ type: 'integer', minimum: 1 });
+    expect(budget).not.toHaveProperty('maximum', 50);
+    expect(searchHepdataTool.input.safeParse({ query: 'x', size: 1000000 }).success).toBe(true);
+  });
+
+  it.each([
+    [1, 1, false],
+    [50, 50, false],
+    [50, 51, true],
+  ] as const)(
+    'keeps a capped budget visible with %i shown and %i matched',
+    async (shown, total, hasMore) => {
+      routePage(pageOf(shown, { total, next: hasMore }));
+      const result = await run({ query: 'x', size: 51 });
+      const out = structured<Output>(result);
+      expect(out).toMatchObject({ size: 50, cap: 50, shown, truncated: hasMore });
+      expect(out.notice).toContain('size 51 reduced to 50.');
+      expect(fullText(result)).toContain('size 51 reduced to 50.');
+      expect(bodyText(result)).toContain('**Size:** 50');
+      if (hasMore) expect(out.notice).toContain('request page 2 for the next 50');
+    },
+  );
+
+  it('uses the effective size for later-page numbering and last-page guidance', async () => {
+    h.route('/data', (request) =>
+      jsonResponse(
+        pageOf(new URL(request.url).searchParams.get('page') === '4' ? 0 : 1, { total: 101 }),
+      ),
+    );
+    const second = await run({ query: 'x', page: 2, size: 51 });
+    expect(bodyText(second)).toContain('### 51. Measurement 1');
+    expect(h.requests[0]?.params.get('size')).toBe('50');
+    const exhausted = await run({ query: 'x', page: 4, size: 51 });
+    expect(structured<Output>(exhausted).notice).toContain('last page (3)');
+    expect(fullText(exhausted)).toContain('last page (3)');
+    expect(fullText(exhausted)).toContain('size 51 reduced to 50.');
+  });
+
+  it('applies the effective window boundary and retains truncation without an unreachable continuation', async () => {
+    routePage(pageOf(1, { next: true, total: 20000 }));
+    const edge = await run({ query: 'x', page: 200, size: 1000000 });
+    const out = structured<Output>(edge);
+    expect(out).toMatchObject({ cap: 50, truncated: true, shown: 1 });
+    expect(out.nextPage).toBeUndefined();
+    expect(out.notice).toContain('size 1000000 reduced to 50.');
+    expect(out.notice).not.toContain('request page');
+    expect(fullText(edge)).toContain('narrow it');
+    const refused = await run({ query: 'x', page: 201, size: 1000000 });
+    expect(errorEnvelope(refused).data).toMatchObject({ reason: 'beyond_result_window', size: 50 });
+    expect(fullText(refused)).toContain('beyond_result_window');
+    expect(h.requests).toHaveLength(1);
+  });
+
+  it.each([50, 51, 1000000])(
+    'accepts budget %i and discloses reductions on an empty result',
+    async (requested) => {
+      routePage(emptyBody());
+      const result = await run({ query: 'Nobody', size: requested });
+      const out = structured<Output>(result);
+      expect(out).toMatchObject({ cap: 50, shown: 0, truncated: false });
+      expect(params()?.get('size')).toBe('50');
+      if (requested > 50) {
+        expect(out.notice).toContain(`size ${requested} reduced to 50`);
+        expect(fullText(result)).toContain(`size ${requested} reduced to 50`);
+      }
+      expect(out.notice).toContain('Nobody');
+    },
+  );
+
+  it('preserves a seven-result budget on an empty response', async () => {
+    routePage(emptyBody());
+    const result = await run({ query: 'Nobody', size: 7 });
+    expect(structured<Output>(result)).toMatchObject({ cap: 7, shown: 0, truncated: false });
+    expect(params()?.get('size')).toBe('7');
+    expect(fullText(result)).toContain('Nobody');
+  });
+
   it('applies the defaults and sends only q, size, page, and fields', async () => {
     routePage();
 
@@ -150,7 +230,7 @@ describe('input', () => {
     ['an unknown sort', { query: 'x', sort: 'mostcited' }],
     ['a differently cased sort', { query: 'x', sort: 'MostRecent' }],
     ['size 0', { query: 'x', size: 0 }],
-    ['size 51', { query: 'x', size: 51 }],
+    ['a negative size', { query: 'x', size: -1 }],
     ['a fractional size', { query: 'x', size: 2.5 }],
     ['a size given as text', { query: 'x', size: '10' }],
     ['page 0', { query: 'x', page: 0 }],

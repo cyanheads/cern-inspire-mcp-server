@@ -183,7 +183,7 @@ const REFERENCE: Record<Topic, Entry[]> = {
     {
       term: 'malformed syntax',
       meaning:
-        'Empty recognized field clauses such as "a:", "a: and t higgs", or dangling "a: not" are invalid; supply a value, for example "a Witten". Quoted values, groups, and value negation such as "a: not Witten" are allowed. This is not complete grammar validation: INSPIRE can widen or empty the match for other malformed syntax. A very large total, or zero hits, can mean a syntax slip.',
+        'Empty recognized field clauses such as a:, a:"", a: " ", "a: and t higgs", or dangling "a: not" are invalid; supply a value, for example "a Witten". Nonempty quoted values, groups, and value negation such as "a: not Witten" are allowed. This is not complete grammar validation: INSPIRE can widen or empty the match for other malformed syntax. A very large total, or zero hits, can mean a syntax slip.',
     },
   ],
   identifiers: [

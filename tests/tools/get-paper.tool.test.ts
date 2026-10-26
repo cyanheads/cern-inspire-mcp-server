@@ -26,6 +26,7 @@ import {
 import type { RawDataMetadata } from '@/services/inspire/types.js';
 import { describeFailureClasses } from '../fixtures/failure-suite.js';
 import { AUTHOR_PAGE_BOUNDARY } from '../fixtures/inspire-authors.js';
+import { PROCEEDINGS_METADATA } from '../fixtures/inspire-documents.js';
 import { MARKUP_AS_TEXT, MARKUP_FREE, PUBLISHER_MARKUP } from '../fixtures/inspire-markup.js';
 import {
   dataMetadata,
@@ -95,6 +96,98 @@ const runRaw = (input: Record<string, unknown>) => run(input as Input);
 const routeRecord = (metadata = dossierMetadata(3)) =>
   h.route('/literature', jsonResponse(literaturePage([metadata])));
 const routeData = (body: unknown = dataPage()) => h.route('/data', jsonResponse(body));
+
+describe('contributors and attached documents', () => {
+  it('delimits attachment destinations containing unmatched parentheses', async () => {
+    routeRecord(
+      dossierMetadata(0, {
+        documents: [{ url: 'https://example.org/file).pdf', filename: 'attachment' }],
+      }),
+    );
+    routeData();
+    const result = await run({ paper: HIGGS.recid });
+    expect(structured<Dossier>(result).documents).toEqual([
+      { url: 'https://example.org/file).pdf', filename: 'attachment' },
+    ]);
+    expect(bodyText(result)).toContain('[attachment](<https://example.org/file).pdf>)');
+  });
+  it('exposes the captured proceedings editors and recorded fulltext.pdf link', async () => {
+    routeRecord(PROCEEDINGS_METADATA);
+    routeData(emptyBody());
+    const result = await run({ paper: '1500425' });
+    const out = structured<Dossier>(result);
+    expect(out.authors.map((author) => author.roles)).toEqual([['editor'], ['editor'], ['editor']]);
+    expect(out.documents).toEqual([
+      {
+        filename: 'fulltext.pdf',
+        fulltext: true,
+        url: 'https://inspirehep.net/files/357195b6adc92a693a72ec7c49bb90df',
+      },
+    ]);
+    expect(bodyText(result)).toContain(
+      '[fulltext.pdf](<https://inspirehep.net/files/357195b6adc92a693a72ec7c49bb90df>)',
+    );
+    expect(bodyText(result)).toContain('**Vanhoefer, Laura** — roles: editor');
+  });
+  it.each([
+    [25, 0, ['Editor', 'Supervisor', 'Unknown']],
+    [0, 0, []],
+    [1, 0, ['Editor']],
+    [1, 1, ['Supervisor']],
+    [1, 2, ['Unknown']],
+    [1, 3, []],
+  ] as const)(
+    'keeps roles and documents independent at budget %i offset %i',
+    async (cap, offset, names) => {
+      routeRecord(
+        dossierMetadata(0, {
+          authors: [
+            { full_name: 'Editor', inspire_roles: ['editor', 'author'] },
+            { full_name: 'Supervisor', inspire_roles: ['supervisor'] },
+            { full_name: 'Unknown' },
+          ],
+          documents: [
+            {
+              url: 'https://example.org/full.pdf',
+              filename: 'fulltext.pdf',
+              description: 'Proceedings',
+              material: 'publication',
+              fulltext: false,
+            },
+            { url: 'https://example.org/private', hidden: true },
+          ],
+        }),
+      );
+      routeData();
+      const result = await run({ paper: HIGGS.recid, max_authors: cap, author_offset: offset });
+      const out = structured<Dossier>(result);
+      expect(out.authors.map((author) => author.name)).toEqual(names);
+      expect(out.documents).toEqual([
+        {
+          url: 'https://example.org/full.pdf',
+          filename: 'fulltext.pdf',
+          description: 'Proceedings',
+          material: 'publication',
+          fulltext: false,
+        },
+      ]);
+      const text = bodyText(result);
+      expect(text).toContain('[fulltext.pdf](<https://example.org/full.pdf>)');
+      expect(text).toContain('description: Proceedings · material: publication · fulltext: no');
+      expect(text).not.toContain('https://example.org/private');
+      for (const author of out.authors) {
+        if (author.name === 'Editor') {
+          expect(author.roles).toEqual(['editor', 'author']);
+          expect(text).toContain('roles: editor, author');
+        } else if (author.name === 'Supervisor') {
+          expect(author.roles).toEqual(['supervisor']);
+          expect(text).toContain('roles: supervisor');
+        } else expect(author.roles).toBeUndefined();
+      }
+      expect(h.requests).toHaveLength(2);
+    },
+  );
+});
 
 /** The resolve request (the recid plus the identifiers it is checked against), when the call made one. */
 const resolveRequest = () =>
@@ -299,7 +392,7 @@ describe('max_authors and the author cap', () => {
       cap: 500,
     });
     expect(out).not.toHaveProperty('nextAuthorOffset');
-    expect(out.notice).toContain('Author list exhausted');
+    expect(out.notice).toContain('Contributor list exhausted');
     expect(fullText(result)).toContain(out.notice);
   });
   it('reaches captured author 501 with identifiers and affiliations intact on both surfaces', async () => {
@@ -436,10 +529,10 @@ describe('max_authors and the author cap', () => {
       nextAuthorOffset: 25,
     });
     const text = bodyText(result);
-    expect(text).toContain('### Authors (25 shown of 2932)');
+    expect(text).toContain('### Contributors (25 shown of 2932)');
     expect(text.split('\n').filter((line) => line.startsWith('- **Doe, Jane '))).toHaveLength(25);
     expect(fullText(result)).toContain('**truncated:** true');
-    expect(fullText(result)).toContain('> Showing positions 1–25 of 2932 available authors');
+    expect(fullText(result)).toContain('> Showing positions 1–25 of 2932 available contributors');
   });
 
   it.each([
@@ -475,7 +568,7 @@ describe('max_authors and the author cap', () => {
     const out = structured<Dossier>(result);
     expect(out.authors).toHaveLength(500);
     expect(out).toMatchObject({ authorCount: 2_932, shown: 500, cap: 500, truncated: true });
-    const notice = `Showing positions 1–500 of 2932 available authors; call cern_inspire_get_paper with paper "${HIGGS.recid}", author_offset 500 and max_authors 500 to continue.`;
+    const notice = `Showing positions 1–500 of 2932 available contributors; call cern_inspire_get_paper with paper "${HIGGS.recid}", author_offset 500 and max_authors 500 to continue.`;
     expect(out.notice).toBe(notice);
     expect(out.notice).not.toContain('raise max_authors');
     expect(fullText(result)).toContain(notice);
@@ -507,7 +600,7 @@ describe('max_authors and the author cap', () => {
     const out = structured<Dossier>(result);
     expect(out).toMatchObject({ truncated: false, shown: 10, cap: 25, authorCount: 10 });
     expect(out.notice).toBeUndefined();
-    expect(bodyText(result)).toContain('### Authors (10 shown of 10)');
+    expect(bodyText(result)).toContain('### Contributors (10 shown of 10)');
     expect(fullText(result)).toContain('**truncated:** false');
   });
 
@@ -533,7 +626,7 @@ describe('max_authors and the author cap', () => {
     const out = structured<Dossier>(result);
     expect(out).toMatchObject({ authors: [], authorCount: 0, truncated: false, shown: 0, cap: 25 });
     expect(out.notice).toBeUndefined();
-    expect(bodyText(result)).toContain('### Authors (0 shown of 0)');
+    expect(bodyText(result)).toContain('### Contributors (0 shown of 0)');
   });
 
   it('with max_authors 0 and no authors in the record, is not truncated', async () => {
@@ -553,7 +646,7 @@ describe('max_authors and the author cap', () => {
 
     const out = structured<Dossier>(result);
     expect(out).toMatchObject({ authorCount: 2_932, shown: 10, truncated: false });
-    expect(bodyText(result)).toContain('### Authors (10 shown of 2932)');
+    expect(bodyText(result)).toContain('### Contributors (10 shown of 2932)');
   });
 
   it('leaves the downloaded request unsliced: one record read carries every author upstream', async () => {
@@ -916,7 +1009,7 @@ describe('papers with more than one HEPData record', () => {
     const out = structured<Dossier>(result);
     expect(out.truncated).toBe(true);
     expect(out.notice).toBe(
-      `Showing positions 1–25 of 30 available authors; call cern_inspire_get_paper with paper "${HIGGS.recid}", author_offset 25 and max_authors 25 to continue. You may also raise max_authors (up to 500). INSPIRE links 2 HEPData records to this paper: hepdata describes 10.17182/hepdata.98625, the lowest record number, and hepdata.otherRecords lists 10.17182/hepdata.156903.`,
+      `Showing positions 1–25 of 30 available contributors; call cern_inspire_get_paper with paper "${HIGGS.recid}", author_offset 25 and max_authors 25 to continue. You may also raise max_authors (up to 500). INSPIRE links 2 HEPData records to this paper: hepdata describes 10.17182/hepdata.98625, the lowest record number, and hepdata.otherRecords lists 10.17182/hepdata.156903.`,
     );
   });
 
@@ -984,7 +1077,7 @@ describe('when the HEPData availability lookup fails', () => {
     const out = structured<Dossier>(result);
     expect(out.truncated).toBe(true);
     expect(out.notice).toBe(
-      `Showing positions 1–25 of 30 available authors; call cern_inspire_get_paper with paper "${HIGGS.recid}", author_offset 25 and max_authors 25 to continue. You may also raise max_authors (up to 500). HEPData availability could not be checked; retry cern_inspire_get_paper, or call cern_inspire_search_hepdata with query "literature.control_number:${HIGGS.recid}".`,
+      `Showing positions 1–25 of 30 available contributors; call cern_inspire_get_paper with paper "${HIGGS.recid}", author_offset 25 and max_authors 25 to continue. You may also raise max_authors (up to 500). HEPData availability could not be checked; retry cern_inspire_get_paper, or call cern_inspire_search_hepdata with query "literature.control_number:${HIGGS.recid}".`,
     );
   });
 
@@ -1192,7 +1285,7 @@ describe('paper_not_found', () => {
     const result = await run({ paper: '10.1000/a[1]<b>' });
 
     const error = expectNotFound(result, '10.1000/a[1]<b>');
-    expect(error.message).toBe('No INSPIRE literature record matches "10.1000/a\\[1\\]&lt;b>".');
+    expect(error.message).toBe('No INSPIRE literature record matches "10.1000/a[1]<b>".');
   });
 
   it('echoes the underscores and tildes of a DOI as written, so it can be sent again', async () => {
@@ -1202,7 +1295,7 @@ describe('paper_not_found', () => {
 
     const error = expectNotFound(result, '10.1000/x_(1)~2_');
     expect(error.message).toBe('No INSPIRE literature record matches "10.1000/x_(1)~2_".');
-    expect(fullText(result)).toContain('"10.1000/x_(1)~2_"');
+    expect(fullText(result)).toContain('"10.1000/x\\_(1)\\~2\\_"');
   });
 
   it('attaches the contract reason through a direct handler call too', async () => {
@@ -1312,7 +1405,7 @@ describe('a recid INSPIRE merged into another record', () => {
 
     expect(out.truncated).toBe(true);
     expect(out.notice).toBe(
-      `${NOTICE} Showing positions 1–5 of 30 available authors; call cern_inspire_get_paper with paper "${SURVIVOR}", author_offset 5 and max_authors 5 to continue. You may also raise max_authors (up to 500).`,
+      `${NOTICE} Showing positions 1–5 of 30 available contributors; call cern_inspire_get_paper with paper "${SURVIVOR}", author_offset 5 and max_authors 5 to continue. You may also raise max_authors (up to 500).`,
     );
   });
 
@@ -1740,7 +1833,7 @@ describe('upstream text stays out of inline markdown slots', () => {
       [
         '## Title INJECTED # heading',
         '### Abstract (source: arXiv-ish INJECTED # heading)',
-        '### Authors (1 shown of 1)',
+        '### Contributors (1 shown of 1)',
         '### HEPData',
         '### Follow-up queries',
         '### Links',
@@ -1801,7 +1894,7 @@ describe('upstream text stays out of inline markdown slots', () => {
 
     const body = bodyText(result).split('\n');
     const start = body.indexOf('### Abstract (source: arXiv)');
-    const end = body.indexOf('### Authors (1 shown of 1)');
+    const end = body.indexOf('### Contributors (1 shown of 1)');
     const quoted = body.slice(start + 1, end).filter((line) => line !== '');
     expect(quoted).toHaveLength(5);
     expect(quoted.every((line) => line.startsWith('>'))).toBe(true);
@@ -1830,7 +1923,7 @@ describe('upstream text stays out of inline markdown slots', () => {
       '## Observation of a new particle in the search for the Standard Model Higgs boson with the ATLAS detector at the LHC',
       '### Publication',
       '### Abstract (source: arXiv)',
-      '### Authors (1 shown of 1)',
+      '### Contributors (1 shown of 1)',
       '### Links',
       '### Licenses',
       '### HEPData',

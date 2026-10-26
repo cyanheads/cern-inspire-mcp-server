@@ -180,8 +180,8 @@ export const searchExperimentsTool = tool('cern_inspire_search_experiments', {
       .describe(
         'Experiment, collaboration, accelerator, or facility name (ATLAS, LHCb, Tevatron), an INSPIRE legacy name (CERN-LHC-CMS), or an experiment recid (digits only).',
       ),
-    limit: blankAsUnset(z.number().int().min(1).max(MAX_LIMIT).default(5)).describe(
-      `Experiments to return (1–${MAX_LIMIT}, default 5).`,
+    limit: blankAsUnset(z.number().int().min(1).default(5)).describe(
+      'Experiments to return (positive integer, default 5; above 25 uses 25).',
     ),
   }),
   output: z.object({
@@ -234,7 +234,12 @@ export const searchExperimentsTool = tool('cern_inspire_search_experiments', {
     },
   ],
 
-  async handler(input, ctx) {
+  async handler(requested, ctx) {
+    const input = { ...requested, limit: Math.min(requested.limit, MAX_LIMIT) };
+    const reduction =
+      requested.limit > input.limit
+        ? `limit ${requested.limit} reduced to ${input.limit}.`
+        : undefined;
     ctx.enrich({ truncated: false, shown: 0, cap: input.limit });
     ctx.enrich.total(0);
 
@@ -249,19 +254,22 @@ export const searchExperimentsTool = tool('cern_inspire_search_experiments', {
     ctx.enrich.total(result.total);
     ctx.log.info('Experiment search completed', { total: result.total, shown });
 
+    const notices: string[] = reduction ? [reduction] : [];
     if (shown === 0) {
-      ctx.enrich.notice(
+      notices.push(
         `No INSPIRE experiment matched "${callerEcho(input.query)}". Try the collaboration's common name or the accelerator (LHC, Tevatron), or search papers with cern_inspire_search_literature using "collaboration:NAME".`,
       );
     } else if (result.total > shown) {
-      ctx.enrich.truncated({
-        shown,
-        cap: input.limit,
-        guidance:
-          input.limit < MAX_LIMIT
-            ? `More experiments matched; raise limit (max ${MAX_LIMIT}) or use a more specific name or legacy name.`
-            : 'More experiments matched than the 25 returned; use a more specific name or legacy name.',
-      });
+      notices.push(
+        input.limit < MAX_LIMIT
+          ? `More experiments matched; raise limit (max ${MAX_LIMIT}) or use a more specific name or legacy name.`
+          : 'More experiments matched than the 25 returned; use a more specific name or legacy name.',
+      );
+    }
+    if (shown > 0 && result.total > shown) {
+      ctx.enrich.truncated({ shown, cap: input.limit, guidance: notices.join(' ') });
+    } else if (notices.length > 0) {
+      ctx.enrich.notice(notices.join(' '));
     }
 
     return { experiments: result.experiments };

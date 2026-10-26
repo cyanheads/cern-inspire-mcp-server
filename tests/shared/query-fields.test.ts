@@ -9,6 +9,12 @@ import { measureGrowth } from '../fixtures/measure-growth.js';
 describe('hasEmptyQueryField', () => {
   it.each([
     'a:',
+    'a:""',
+    "a:''",
+    'a: " "',
+    'a:("")',
+    'a: not ""',
+    'a:(((not "\n\t ")))',
     '(a:)',
     'a: and t higgs',
     't: OR a Witten',
@@ -30,6 +36,9 @@ describe('hasEmptyQueryField', () => {
     '(t:higgs and not a:Witten)',
     't "a:"',
     't:"and or not"',
+    'a:"\\""',
+    "a:'\\''",
+    'refersto:a:""',
     't:"escaped \\" a: still quoted"',
     "t:'a:'",
     't:/foo a: or bar/',
@@ -51,28 +60,39 @@ describe('hasEmptyQueryField', () => {
     expect(hasEmptyQueryField(query)).toBe(false),
   );
 
-  it.each(['plain', 'repeated', 'open', 'nested', 'overlapping', 'quoted'] as const)(
-    'bounds %s scanning over a 64x span using thread CPU',
-    (shape) => {
-      const input = (size: number) => {
-        const unit = {
-          plain: 'x',
-          repeated: 'a:Witten ',
-          open: 'a:(',
-          nested: '(not ',
-          overlapping: 'a:a:a:',
-          quoted: '"a: not" ',
-        }[shape];
-        return unit.repeat(Math.ceil(size / unit.length));
-      };
-      for (const size of [20_000, 80_000, 320_000]) {
-        const growth = measureGrowth(
-          hasEmptyQueryField,
-          { small: input(5_000), large: input(size) },
-          { maxLargeMs: 100, maxRatio: 256 },
-        );
-        expect(growth.withinLimits, `${shape} ${size}: ${growth.summary}`).toBe(true);
-      }
-    },
-  );
+  it.each([
+    'plain',
+    'repeated',
+    'open',
+    'nested',
+    'overlapping',
+    'quoted',
+    'unclosed',
+    'finalBreak',
+    'breaks',
+  ] as const)('bounds %s scanning over a 64x span using thread CPU', (shape) => {
+    const input = (size: number) => {
+      const unit = {
+        plain: 'x',
+        repeated: 'a:Witten ',
+        open: 'a:(',
+        nested: '(not ',
+        overlapping: 'a:a:a:',
+        quoted: '"a: not" ',
+        unclosed: 'a:"',
+        finalBreak: ' ',
+        breaks: 'a:"\n " ',
+      }[shape];
+      const text = unit.repeat(Math.ceil(size / unit.length));
+      return shape === 'finalBreak' ? `a:"${text}\n"` : text;
+    };
+    for (const size of [10_000, 20_000, 40_000, 80_000, 160_000, 320_000]) {
+      const growth = measureGrowth(
+        hasEmptyQueryField,
+        { small: input(5_000), large: input(size) },
+        { maxLargeMs: 100, maxRatio: 256 },
+      );
+      expect(growth.withinLimits, `${shape} ${size}: ${growth.summary}`).toBe(true);
+    }
+  });
 });

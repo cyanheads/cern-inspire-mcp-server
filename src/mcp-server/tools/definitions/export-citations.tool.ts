@@ -40,7 +40,7 @@ export const exportCitationsTool = tool('cern_inspire_export_citations', {
       .min(1)
       .max(1000)
       .describe(
-        'Literature query selecting the papers to cite, narrowed by the same document_types, subjects, year_from and year_to filters as search. Named papers: "recid:451647 or arxiv:1207.7214 or doi:10.1016/j.physletb.2012.08.020". Or a topic ("t higgs and topcite 500+"), an author ("a Edward.Witten.1"), or citing papers ("refersto:recid:451647"). Empty recognized field clauses such as "a:" are invalid; other syntax is passed through without complete grammar validation. See cern_inspire_list_reference topic search_syntax.',
+        'Literature query selecting the papers to cite, narrowed by the same document_types, subjects, year_from and year_to filters as search. Named papers: "recid:451647 or arxiv:1207.7214 or doi:10.1016/j.physletb.2012.08.020". Or a topic ("t higgs and topcite 500+"), an author ("a Edward.Witten.1"), or citing papers ("refersto:recid:451647"). Empty recognized field clauses such as a: or a:"" (including whitespace-only quoted values) are invalid; other syntax is passed through without complete grammar validation. See cern_inspire_list_reference topic search_syntax.',
       ),
     format: blankAsUnset(z.enum(FORMATS).default('bibtex')).describe(
       'Entry format: bibtex (default), latex-eu, or latex-us (\\bibitem entries in European or US style).',
@@ -53,10 +53,10 @@ export const exportCitationsTool = tool('cern_inspire_export_citations', {
       'Entry order: relevance (default), mostrecent, or mostcited.',
     ),
     page: blankAsUnset(z.number().int().min(1).default(1)).describe(
-      'Page number, starting at 1. page × size may not exceed 10,000.',
+      'Page number, starting at 1. page × effective size (after clamping) may not exceed 10,000.',
     ),
-    size: blankAsUnset(z.number().int().min(1).max(MAX_ENTRIES).default(10)).describe(
-      'Entries per page (1–50, default 10).',
+    size: blankAsUnset(z.number().int().min(1).default(10)).describe(
+      'Entries per page (positive integer, default 10; above 50 uses 50).',
     ),
   }),
   // The sibling top-N tools (search_authors, search_experiments) call their cap `limit`.
@@ -94,7 +94,7 @@ export const exportCitationsTool = tool('cern_inspire_export_citations', {
       .string()
       .optional()
       .describe(
-        'Guidance when nothing matched, the page is past the last or came back empty inside the match count, more papers follow, or the page could not be checked against the match count.',
+        'Guidance when size was reduced, nothing matched, the page is past the last or came back empty inside the match count, or more papers follow.',
       ),
   },
   enrichmentTrailer: {
@@ -113,7 +113,7 @@ export const exportCitationsTool = tool('cern_inspire_export_citations', {
     {
       reason: 'beyond_result_window',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'page × size exceeds the 10,000 results INSPIRE serves for one query.',
+      when: 'page × effective size (after clamping) exceeds the 10,000 results INSPIRE serves for one query.',
       recovery:
         'Narrow the query with tighter terms, such as a date range ("and date > 2015") or a collaboration, until it matches under 10,000 papers, then page again with cern_inspire_export_citations.',
       severity: 'notice',
@@ -148,14 +148,17 @@ export const exportCitationsTool = tool('cern_inspire_export_citations', {
     {
       reason: 'upstream_unreadable',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'The INSPIRE body exceeded the byte ceiling, or was JSON or HTML where citation text was expected.',
+      when: 'The INSPIRE body exceeded the byte ceiling, the citation page was JSON or HTML instead of citation text, or selection verification returned unreadable JSON.',
       recovery:
         'Retry this call in a few seconds; if it fails again, INSPIRE is likely serving an error page, so wait a minute before retrying cern_inspire_export_citations with the same page and size.',
       thrownBy: 'service',
     },
   ],
 
-  async handler(input, ctx) {
+  async handler(requested, ctx) {
+    const input = { ...requested, size: Math.min(requested.size, MAX_ENTRIES) };
+    const reduction =
+      requested.size > input.size ? `size ${requested.size} reduced to ${input.size}.` : undefined;
     const filters = {
       documentTypes: input.document_types,
       subjects: input.subjects,
@@ -216,14 +219,9 @@ export const exportCitationsTool = tool('cern_inspire_export_citations', {
       truncated: result.truncated,
     });
 
-    const unchecked = input.page > 1 && result.total === undefined;
-    const notices: string[] = [];
+    const notices: string[] = reduction ? [reduction] : [];
     if (shown === 0) {
       notices.push(emptyPageNotice(input, result.total));
-    } else if (unchecked) {
-      notices.push(
-        "INSPIRE's match count could not be read, so this page is unchecked against it: past the last page, INSPIRE can return an entry from an earlier page again (it does for OR queries).",
-      );
     }
 
     if (result.truncated) {
@@ -233,13 +231,11 @@ export const exportCitationsTool = tool('cern_inspire_export_citations', {
       notices.unshift(
         !reachable
           ? 'INSPIRE serves only the first 10,000 results of a query; narrow it with tighter terms, such as a date range or a collaboration, to export the rest.'
-          : unchecked
-            ? `This page came back full; request page ${nextPage} for any further entries.`
-            : `More papers matched; request page ${nextPage} for the next ${input.size}${
-                input.page === 1 && input.size < MAX_ENTRIES
-                  ? `, or raise size (up to ${MAX_ENTRIES}) to export more per call`
-                  : ''
-              }.`,
+          : `More papers matched; request page ${nextPage} for the next ${input.size}${
+              input.page === 1 && input.size < MAX_ENTRIES
+                ? `, or raise size (up to ${MAX_ENTRIES}) to export more per call`
+                : ''
+            }.`,
       );
       ctx.enrich.truncated({ shown, cap: input.size, guidance: notices.join(' ') });
     } else if (notices.length > 0) {
@@ -270,15 +266,12 @@ export const exportCitationsTool = tool('cern_inspire_export_citations', {
 
 /**
  * Why a page holds no entries: nothing matched, the page is past the last, INSPIRE
- * sent nothing for a page inside its own count, or no total was read to tell.
+ * sent nothing for a page inside its own verified count.
  */
 function emptyPageNotice(
   input: { page: number; query: string; size: number },
   total: number | undefined,
 ): string {
-  if (input.page > 1 && total === undefined) {
-    return `Page ${input.page} came back empty and INSPIRE's match count could not be read, so either it is past the last page or nothing matched; request page 1 to tell which.`;
-  }
   if (total === undefined || total === 0) {
     return `No INSPIRE literature matched "${callerEcho(input.query)}"; find the papers with cern_inspire_search_literature, then export by recid ("recid:N or recid:M").`;
   }

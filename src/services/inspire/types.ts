@@ -54,6 +54,7 @@ export interface RawLiteratureAuthor {
   affiliations?: RawValue[];
   full_name?: string;
   ids?: RawId[];
+  inspire_roles?: string[];
   record?: RawRef;
 }
 
@@ -70,6 +71,14 @@ export interface RawLiteratureMetadata {
   control_number?: number;
   core?: boolean;
   document_type?: string[];
+  documents?: {
+    url?: string;
+    filename?: string;
+    description?: string;
+    material?: string;
+    fulltext?: boolean;
+    hidden?: boolean;
+  }[];
   dois?: RawValue[];
   earliest_date?: string;
   first_author?: { full_name?: string; recid?: number };
@@ -252,6 +261,7 @@ export interface PaperAuthor {
   name: string;
   orcid?: string;
   recid?: string;
+  roles?: string[];
 }
 
 export interface PaperPublication {
@@ -307,6 +317,13 @@ export interface PaperDossier {
   collaborations: string[];
   core?: boolean;
   date?: string;
+  documents: {
+    url: string;
+    filename?: string;
+    description?: string;
+    material?: string;
+    fulltext?: boolean;
+  }[];
   documentTypes: string[];
   dois: string[];
   experiments: { name: string; recid?: string }[];
@@ -349,13 +366,12 @@ export interface CitationEntry {
 export interface CitationExport {
   entries: CitationEntry[];
   /**
-   * INSPIRE's match total, read on a later page only: absent on page 1, whose
-   * extra entry answers `truncated`, and when a later page's total request failed.
+   * Verified match total for filtered or later pages. Absent on unfiltered page
+   * 1, whose extra entry answers `truncated`. Failed verification throws.
    */
   total?: number;
   /**
-   * True when more matched papers follow this page. On a later page without a
-   * total, true when the page came back full.
+   * True when more matched papers follow this page.
    */
   truncated: boolean;
 }

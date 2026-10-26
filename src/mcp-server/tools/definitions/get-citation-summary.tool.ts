@@ -26,7 +26,7 @@ import {
 } from '@/services/inspire/inspire-service.js';
 import type { FacetFilters, SeriesIgnoredFilter } from '@/services/inspire/types.js';
 import { CITATION_BUCKET_RANGES } from '@/services/inspire/vocabulary.js';
-import { callerEcho, cell, inline } from '@/utils/render.js';
+import { callerEcho, cell, errorText, inline } from '@/utils/render.js';
 
 /**
  * Up to this many matched records, a repeat of a cut series may be answered from
@@ -105,7 +105,7 @@ export const getCitationSummaryTool = tool('cern_inspire_get_citation_summary', 
   input: z.object({
     author: authorIdInput,
     query: blankAsUnset(z.string().trim().max(1000).optional()).describe(
-      'An INSPIRE literature query, e.g. "collaboration:atlas", "t neutrino oscillation", "a Edward.Witten.1", or "affid:902725" for an institution\'s papers (CERN; affid takes the institution recid that cern_inspire_search_authors and cern_inspire_search_experiments return). Empty recognized field clauses such as "a:" are invalid; other syntax is passed through without complete grammar validation. Literature queries do not match ORCIDs; pass an ORCID as author. Pass this or author, not both.',
+      'An INSPIRE literature query, e.g. "collaboration:atlas", "t neutrino oscillation", "a Edward.Witten.1", or "affid:902725" for an institution\'s papers (CERN; affid takes the institution recid that cern_inspire_search_authors and cern_inspire_search_experiments return). Empty recognized field clauses such as a: or a:"" (including whitespace-only quoted values) are invalid; other syntax is passed through without complete grammar validation. Literature queries do not match ORCIDs; pass an ORCID as author. Pass this or author, not both.',
     ),
     document_types: documentTypesInput,
     subjects: subjectsInput,
@@ -310,7 +310,7 @@ export const getCitationSummaryTool = tool('cern_inspire_get_citation_summary', 
       if (route.matchedAs === 'name') {
         throw ctx.fail(
           'author_not_identifier',
-          `author "${callerEcho(input.author)}" is not a BAI, ORCID, INSPIRE ID, or author recid.`,
+          `author "${errorText(input.author)}" is not a BAI, ORCID, INSPIRE ID, or author recid.`,
           { author: input.author },
         );
       }
@@ -318,7 +318,7 @@ export const getCitationSummaryTool = tool('cern_inspire_get_citation_summary', 
       if (!resolved) {
         throw ctx.fail(
           'author_not_found',
-          `No INSPIRE author profile matched "${callerEcho(input.author)}" as ${route.matchedAs}.`,
+          `No INSPIRE author profile matched "${errorText(input.author)}" as ${route.matchedAs}.`,
           { author: input.author, matchedAs: route.matchedAs },
         );
       }

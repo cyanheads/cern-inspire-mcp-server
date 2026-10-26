@@ -103,13 +103,13 @@ const LITERATURE_FIELDS =
   'control_number,titles.title,first_author.full_name,first_author.recid,author_count,collaborations.value,earliest_date,document_type,citation_count,citation_count_without_self_citations,arxiv_eprints,dois.value,publication_info,abstracts.value,abstracts.source';
 
 const DOSSIER_FIELDS =
-  'control_number,titles,abstracts,authors.full_name,authors.affiliations.value,authors.record,authors.ids,author_count,collaborations,accelerator_experiments,arxiv_eprints,dois,publication_info,report_numbers,keywords,inspire_categories,document_type,refereed,core,citeable,number_of_pages,earliest_date,preprint_date,imprints,citation_count,citation_count_without_self_citations,texkeys,urls,license';
+  'control_number,titles,abstracts,authors.full_name,authors.affiliations.value,authors.record,authors.ids,authors.inspire_roles,documents.url,documents.filename,documents.description,documents.material,documents.fulltext,documents.hidden,author_count,collaborations,accelerator_experiments,arxiv_eprints,dois,publication_info,report_numbers,keywords,inspire_categories,document_type,refereed,core,citeable,number_of_pages,earliest_date,preprint_date,imprints,citation_count,citation_count_without_self_citations,texkeys,urls,license';
 
 /** The resolve step asks for the recid and the identifiers it checks the hit against. */
 const RESOLVE_FIELDS = 'control_number,dois.value,arxiv_eprints.value';
 
 describe('searchLiterature request', () => {
-  it('sends only q, size, page, and the fixed fields list for a default relevance search', async () => {
+  it('sends page fields plus a parallel count for a later relevance search', async () => {
     h.route('/literature', jsonResponse(literaturePage()));
 
     await h.service.searchLiterature(
@@ -117,7 +117,7 @@ describe('searchLiterature request', () => {
       h.call(),
     );
 
-    expect(h.requests).toHaveLength(1);
+    expect(h.requests).toHaveLength(2);
     const request = h.requests[0];
     expect(request?.path).toBe('/api/literature');
     expect(sortedNames()).toEqual(['fields', 'page', 'q', 'size']);
@@ -1321,30 +1321,19 @@ describe('exportCitations past page 1', () => {
     ['an HTML page', () => htmlResponse()],
     ['a 400', () => jsonResponse(badRequestBody('Invalid query.'), { status: 400 })],
     ['a 500', () => new Response('upstream trouble', { status: 500 })],
-  ])(
-    'returns the page as INSPIRE sent it, without a total, when the total request answers %s',
-    async (_label, reply) => {
-      routeSplit(pagedLiterature(HIGGS_REFERENCE_TEXKEYS), reply);
+  ])('fails verification when the total request answers %s', async (_label, reply) => {
+    routeSplit(pagedLiterature(HIGGS_REFERENCE_TEXKEYS), reply);
 
-      const outcome = await settleWithFakeTimers(() =>
-        h.service.exportCitations(exportParams({ page: 2, size: 50 }), h.call()),
-      );
+    const outcome = await settleWithFakeTimers(() =>
+      h.service.exportCitations(exportParams({ page: 2, size: 50 }), h.call()),
+    );
 
-      if (!outcome.ok) throw outcome.error;
-      expect(outcome.value.entries.map((e) => e.texkey)).toEqual(
-        HIGGS_REFERENCE_TEXKEYS.slice(50, 100),
-      );
-      expect(outcome.value).not.toHaveProperty('total');
-      expect(outcome.value.truncated).toBe(true);
-      expect(h.log.calls).toContainEqual({
-        level: 'warning',
-        msg: 'Citation export total lookup failed; returning the page unchecked',
-        data: expect.objectContaining({ page: 2 }),
-      });
-    },
-  );
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) throw new Error('Expected count verification to fail.');
+    expect(outcome.error).toBeInstanceOf(McpError);
+  });
 
-  it('reads a short page under a failed total as the last, and an empty one as no entries', async () => {
+  it('fails short and empty pages when their required total is unreadable', async () => {
     routeSplit(pagedLiterature(HIGGS_REFERENCE_TEXKEYS), () => htmlResponse());
 
     const short = await settleWithFakeTimers(() =>
@@ -1354,9 +1343,12 @@ describe('exportCitations past page 1', () => {
       h.service.exportCitations(exportParams({ page: 4, size: 50 }), h.call()),
     );
 
-    expect(short.ok && short.value.entries.length).toBe(38);
-    expect(short.ok && short.value.truncated).toBe(false);
-    expect(empty.ok && empty.value).toEqual({ entries: [], truncated: false });
+    expect(short.ok).toBe(false);
+    expect(empty.ok).toBe(false);
+    for (const outcome of [short, empty]) {
+      if (outcome.ok) throw new Error('Expected count verification to fail.');
+      expect(outcome.error).toMatchObject({ data: { reason: 'upstream_unreadable' } });
+    }
   });
 
   it('fails with the page’s own error when the export request fails, whatever the total', async () => {

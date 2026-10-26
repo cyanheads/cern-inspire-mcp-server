@@ -1,6 +1,6 @@
 /**
  * @fileoverview cern_inspire_get_paper — one INSPIRE-HEP paper's full record by
- * recid, arXiv ID, or DOI: authors with affiliations, abstract, publication,
+ * recid, arXiv ID, or DOI: contributors with affiliations and recorded roles, public attached-document links, abstract, publication,
  * identifiers, citation counts, linked experiments, and whether HEPData holds
  * its numerical tables. Also exports the dossier schema the
  * `inspire://literature/{recid}` resource validates against.
@@ -12,7 +12,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { blankAsUnset, hepdataRecordRoute, paperInput } from '@/mcp-server/tools/inputs.js';
 import { hepdataRecordNumber } from '@/services/inspire/identifiers.js';
 import { getInspireService } from '@/services/inspire/inspire-service.js';
-import { atLineStart, callerEcho, identifier, inline, printUrl, quote } from '@/utils/render.js';
+import { atLineStart, errorText, identifier, inline, printUrl, quote } from '@/utils/render.js';
 
 /** Upper bound on `max_authors`; the full count is always in `authorCount`. */
 const MAX_AUTHORS_LIMIT = 500;
@@ -66,25 +66,31 @@ export const paperDossierSchema = z.object({
     .string()
     .optional()
     .describe('Who supplied the abstract (e.g. arXiv, a publisher).'),
-  authorCount: z.number().describe('Total number of authors on the paper.'),
+  authorCount: z
+    .number()
+    .describe('Upstream contributor count, falling back to the available contributor list length.'),
   authorOffset: z
     .number()
     .int()
     .min(0)
-    .describe('Zero-based starting position in the normalized available author list.'),
+    .describe('Zero-based starting position in the normalized available contributor list.'),
   nextAuthorOffset: z
     .number()
     .int()
     .min(0)
     .optional()
     .describe(
-      'Pass as author_offset to read the next page; absent when no authors remain or the budget is zero.',
+      'Pass as author_offset to read the next page; absent when no contributors remain or the budget is zero.',
     ),
   authors: z
     .array(
       z
         .object({
-          name: z.string().describe('Author name, "Surname, Given names".'),
+          name: z.string().describe('Contributor name, "Surname, Given names".'),
+          roles: z
+            .array(z.string().describe('Recorded INSPIRE contributor role.'))
+            .optional()
+            .describe('Roles in recorded order; absent roles are unknown.'),
           recid: z
             .string()
             .optional()
@@ -100,12 +106,12 @@ export const paperDossierSchema = z.object({
           orcid: z.string().optional().describe('ORCID, when known.'),
           affiliations: z
             .array(z.string().describe('Affiliation name.'))
-            .describe('Affiliations listed for this author on this paper.'),
+            .describe('Affiliations listed for this contributor on this paper.'),
         })
-        .describe('One author.'),
+        .describe('One contributor.'),
     )
     .describe(
-      'Authors in record order from authorOffset, capped at the effective max_authors budget.',
+      'Contributors in record order from authorOffset, capped at the effective max_authors budget.',
     ),
   collaborations: z
     .array(z.string().describe('Collaboration name.'))
@@ -179,6 +185,22 @@ export const paperDossierSchema = z.object({
   texkeys: z
     .array(z.string().describe('A texkey.'))
     .describe('INSPIRE texkeys (BibTeX citation keys), current first.'),
+  documents: z
+    .array(
+      z
+        .object({
+          url: z.string().describe('Public attached-document URL.'),
+          filename: z.string().optional().describe('Recorded filename.'),
+          description: z.string().optional().describe('Recorded document description.'),
+          material: z.string().optional().describe('Recorded version or material qualifier.'),
+          fulltext: z
+            .boolean()
+            .optional()
+            .describe('Recorded full-text flag; absent means unknown.'),
+        })
+        .describe('One public attached document.'),
+    )
+    .describe('Public attached-document links in record order; no file contents are fetched.'),
   urls: z
     .array(
       z
@@ -258,7 +280,7 @@ function renderAuthor(a: PaperDossierOutput['authors'][number]): string {
   ].filter(Boolean);
   const affiliations =
     a.affiliations.length > 0 ? ` — ${a.affiliations.map(inline).join('; ')}` : '';
-  return `- **${inline(a.name)}**${ids.length > 0 ? ` (${ids.join(' · ')})` : ''}${affiliations}`;
+  return `- **${inline(a.name)}**${a.roles === undefined ? '' : ` — roles: ${a.roles.map(inline).join(', ') || 'not recorded'}`}${ids.length > 0 ? ` (${ids.join(' · ')})` : ''}${affiliations}`;
 }
 
 type HepdataRecordOutput = NonNullable<PaperDossierOutput['hepdata']['otherRecords']>[number];
@@ -395,7 +417,7 @@ function renderPaperDossier(paper: PaperDossierOutput): string {
 
   lines.push(
     '',
-    `### Authors (${paper.authors.length} shown of ${paper.authorCount})`,
+    `### Contributors (${paper.authors.length} shown of ${paper.authorCount})`,
     `**Author offset:** ${paper.authorOffset}${paper.authors.length > 0 ? ` · **Positions:** ${paper.authorOffset + 1}–${paper.authorOffset + paper.authors.length}` : ''}`,
     ...(paper.nextAuthorOffset === undefined
       ? []
@@ -416,6 +438,21 @@ function renderPaperDossier(paper: PaperDossierOutput): string {
         (u) =>
           `- ${atLineStart(printUrl(u.url))}${u.description ? ` — ${inline(u.description)}` : ''}`,
       ),
+    );
+  }
+  if (paper.documents.length > 0) {
+    lines.push(
+      '',
+      '### Attached documents',
+      ...paper.documents.map((document) => {
+        const details = [
+          document.filename && `filename: ${inline(document.filename)}`,
+          document.description && `description: ${inline(document.description)}`,
+          document.material && `material: ${inline(document.material)}`,
+          document.fulltext !== undefined && `fulltext: ${yesNo(document.fulltext)}`,
+        ].filter(Boolean);
+        return `- [${inline(document.filename ?? document.url)}](<${printUrl(document.url).replaceAll('\\', '%5C')}>)${details.length > 0 ? ` — ${details.join(' · ')}` : ''}`;
+      }),
     );
   }
   if (paper.licenses.length > 0) {
@@ -444,15 +481,15 @@ function renderPaperDossier(paper: PaperDossierOutput): string {
 export const getPaperTool = tool('cern_inspire_get_paper', {
   title: 'Get INSPIRE paper',
   description:
-    "Fetch one paper's full INSPIRE-HEP record by recid, arXiv ID, or DOI: authors with affiliations and identifiers, abstract, publication references, arXiv and DOI identifiers, keywords, subjects, citation counts, linked experiments, texkeys, and whether HEPData holds its numerical tables (record DOI, latest version, table count, hepdata.net link). Also returns ready-made literature queries for the papers citing it and for its references. Large collaboration papers can list thousands of authors; max_authors caps the list while authorCount gives the full number.",
+    "Fetch one paper's full INSPIRE-HEP record by recid, arXiv ID, or DOI: contributors with affiliations and recorded roles, public attached-document links and identifiers, abstract, publication references, arXiv and DOI identifiers, keywords, subjects, citation counts, linked experiments, texkeys, and whether HEPData holds its numerical tables (record DOI, latest version, table count, hepdata.net link). Also returns ready-made literature queries for the papers citing it and for its references. Large collaboration papers can list thousands of authors; max_authors caps the list while authorCount gives the full number.",
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     paper: paperInput,
     max_authors: blankAsUnset(z.number().int().min(0).default(25)).describe(
-      'Most authors to list (nonnegative integer, default 25; values above 500 use 500). Zero lists no authors. The full count is always in authorCount.',
+      'Most contributors to list (nonnegative integer, default 25; values above 500 use 500). Zero lists no contributors. The full count is always in authorCount.',
     ),
     author_offset: blankAsUnset(z.number().int().min(0).default(0)).describe(
-      'Zero-based starting position in the normalized author list (default 0). Use nextAuthorOffset from the previous page.',
+      'Zero-based starting position in the normalized contributor list (default 0). Use nextAuthorOffset from the previous page.',
     ),
   }),
   output: paperDossierSchema,
@@ -460,15 +497,15 @@ export const getPaperTool = tool('cern_inspire_get_paper', {
     truncated: z
       .boolean()
       .describe(
-        'True when available authors remain after this page, including a zero-budget page.',
+        'True when available contributors remain after this page, including a zero-budget page.',
       ),
-    shown: z.number().describe('Number of authors listed.'),
+    shown: z.number().describe('Number of contributors listed.'),
     cap: z.number().describe('The max_authors cap applied.'),
     notice: z
       .string()
       .optional()
       .describe(
-        'Guidance when the recid asked for was merged into this record, the author list was capped, HEPData availability could not be checked, or the paper has more than one HEPData record.',
+        'Guidance when the recid asked for was merged into this record, the contributor list was capped, HEPData availability could not be checked, or the paper has more than one HEPData record.',
       ),
   },
   errors: [
@@ -521,7 +558,7 @@ export const getPaperTool = tool('cern_inspire_get_paper', {
       if (record) {
         throw ctx.fail(
           'paper_not_found',
-          `No INSPIRE literature record carries "${callerEcho(input.paper)}", a DOI of HEPData record ${record}, which names the data rather than a paper.`,
+          `No INSPIRE literature record carries "${errorText(input.paper)}", a DOI of HEPData record ${record}, which names the data rather than a paper.`,
           {
             paper: input.paper,
             recovery: { hint: `To reach its paper, ${hepdataRecordRoute(record)}.` },
@@ -530,7 +567,7 @@ export const getPaperTool = tool('cern_inspire_get_paper', {
       }
       throw ctx.fail(
         'paper_not_found',
-        `No INSPIRE literature record matches "${callerEcho(input.paper)}".`,
+        `No INSPIRE literature record matches "${errorText(input.paper)}".`,
         { paper: input.paper },
       );
     }
@@ -551,12 +588,12 @@ export const getPaperTool = tool('cern_inspire_get_paper', {
     if (capped) {
       notices.push(
         cap === 0
-          ? `No authors listed at author_offset ${input.author_offset}; request a positive max_authors budget to read the available authors.`
-          : `Showing positions ${input.author_offset + 1}–${input.author_offset + shown} of ${authorsInRecord} available authors; call cern_inspire_get_paper with paper "${paper.recid}", author_offset ${paper.nextAuthorOffset} and max_authors ${cap} to continue.${cap < MAX_AUTHORS_LIMIT ? ` You may also raise max_authors (up to ${MAX_AUTHORS_LIMIT}).` : ''}`,
+          ? `No contributors listed at author_offset ${input.author_offset}; request a positive max_authors budget to read the available contributors.`
+          : `Showing positions ${input.author_offset + 1}–${input.author_offset + shown} of ${authorsInRecord} available contributors; call cern_inspire_get_paper with paper "${paper.recid}", author_offset ${paper.nextAuthorOffset} and max_authors ${cap} to continue.${cap < MAX_AUTHORS_LIMIT ? ` You may also raise max_authors (up to ${MAX_AUTHORS_LIMIT}).` : ''}`,
       );
     } else if (input.author_offset > 0 && shown === 0) {
       notices.push(
-        `Author list exhausted at author_offset ${input.author_offset}; ${authorsInRecord} authors are available in this record.`,
+        `Contributor list exhausted at author_offset ${input.author_offset}; ${authorsInRecord} contributors are available in this record.`,
       );
     }
     if (paper.hepdata.status === 'lookup_failed') {

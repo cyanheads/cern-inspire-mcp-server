@@ -12,6 +12,7 @@ import {
   badRequestBody,
   exportBody,
   jsonResponse,
+  literatureMetadata,
   literaturePage,
   pagedLiterature,
   textResponse,
@@ -63,20 +64,30 @@ describe('query characterization', () => {
 
 describe('empty recognized clauses', () => {
   for (const definition of [searchLiteratureTool, getCitationSummaryTool, exportCitationsTool]) {
-    it.each(['a:', '(a:)', 'a: and t higgs', 't: or a Witten', 'a: not', 'a:(not)', 'a: not not'])(
-      `${definition.name} rejects %s before requests`,
-      async (query) => {
-        h.route('/literature', jsonResponse(badRequestBody(), { status: 400 }));
-        h.route('/literature/facets', jsonResponse(badRequestBody(), { status: 400 }));
-        const result = await runToolContract(definition, { query });
-        expect(h.requests).toHaveLength(0);
-        const error = errorEnvelope(result);
-        expect(error.data?.reason).toBe('invalid_query');
-        expect(error.data?.recovery?.hint).toContain('a Witten');
-        expect(fullText(result)).toContain(error.data?.recovery?.hint);
-        expect(h.requests).toHaveLength(0);
-      },
-    );
+    it.each([
+      'a:',
+      '(a:)',
+      'a: and t higgs',
+      't: or a Witten',
+      'a: not',
+      'a:(not)',
+      'a: not not',
+      'a:""',
+      "a:''",
+      'a: " "',
+      'a:("")',
+      'a: not ""',
+    ])(`${definition.name} rejects %s before requests`, async (query) => {
+      h.route('/literature', jsonResponse(badRequestBody(), { status: 400 }));
+      h.route('/literature/facets', jsonResponse(badRequestBody(), { status: 400 }));
+      const result = await runToolContract(definition, { query });
+      expect(h.requests).toHaveLength(0);
+      const error = errorEnvelope(result);
+      expect(error.data?.reason).toBe('invalid_query');
+      expect(error.data?.recovery?.hint).toContain('a Witten');
+      expect(fullText(result)).toContain(error.data?.recovery?.hint);
+      expect(h.requests).toHaveLength(0);
+    });
   }
 });
 
@@ -115,7 +126,7 @@ describe('export filters', () => {
         expect(fullText(result)).toContain(output.appliedFilters);
         for (const entry of output.entries) expect(fullText(result)).toContain(entry.texkey);
       }
-      expect(h.requests).toHaveLength(7);
+      expect(h.requests).toHaveLength(8);
       expect(h.requests[0]?.params.get('size')).toBe('3');
       expect(h.requests[0]?.params.has('page')).toBe(false);
     },
@@ -176,7 +187,7 @@ describe('export filters', () => {
         year_to: 1990,
       });
       expect(result.isError).toBeFalsy();
-      expect(h.requests).toHaveLength(page === 1 ? 1 : 2);
+      expect(h.requests).toHaveLength(2);
       for (const request of h.requests) {
         expect(request.params.getAll('doc_type')).toEqual(['published', 'review']);
         expect(request.params.getAll('subject')).toEqual(['Theory-HEP']);
@@ -199,4 +210,188 @@ describe('export filters', () => {
     expect(fullText(result)).toContain(error.data?.recovery?.hint);
     expect(h.requests).toHaveLength(0);
   });
+});
+
+describe('reference fallback selection verification', () => {
+  it.each(['mostcited', 'mostrecent'] as const)(
+    'preserves useful unfiltered first-page fallback under %s in one request',
+    async (sort) => {
+      h.route('/literature', (request) =>
+        new URL(request.url).searchParams.has('format')
+          ? textResponse(exportBody(BIBTEX_ENTRIES))
+          : jsonResponse(literaturePage()),
+      );
+      const search = await runToolContract(searchLiteratureTool, {
+        query: 'Bibliographic reference 2012',
+        size: 1,
+        sort,
+      });
+      expect(structured<{ papers: { recid: string }[] }>(search).papers[0]?.recid).toBe('1124337');
+      expect(fullText(search)).toContain('Observation of a new particle');
+      const exported = await runToolContract(exportCitationsTool, {
+        query: 'Bibliographic reference 2012',
+        size: 1,
+        sort,
+      });
+      expect(structured<{ entries: unknown[] }>(exported).entries).toHaveLength(1);
+      expect(h.requests).toHaveLength(2);
+    },
+  );
+
+  it.each(['bibtex', 'latex-eu', 'latex-us'] as const)(
+    'preserves filtered %s Boolean selection through exhausted pages',
+    async (format) => {
+      const keys = ['One:2020a', 'Two:2020b'];
+      const responder = pagedLiterature(keys, { leftover: true });
+      h.route('/literature', responder);
+      for (const page of [1, 2, 3]) {
+        const result = await runToolContract(exportCitationsTool, {
+          query: '(arxiv:1207.7214 or arxiv:1207.7235)',
+          document_types: ['published'],
+          page,
+          size: 1,
+          format,
+        });
+        expect(
+          structured<{ entries: { texkey: string }[] }>(result).entries.map(
+            (entry) => entry.texkey,
+          ),
+        ).toEqual(keys.slice(page - 1, page));
+        expect(structured<{ truncated: boolean }>(result).truncated).toBe(page === 1);
+        if (page < 3) expect(fullText(result)).toContain(keys[page - 1]);
+      }
+      expect(h.requests).toHaveLength(6);
+    },
+  );
+
+  for (const definition of [searchLiteratureTool, exportCitationsTool]) {
+    it.each([
+      'arxiv:1207.7214',
+      'doi:10.1016/j.physletb.2012.08.020',
+      '((arxiv:1207.7214))',
+      'arxiv:1207.7214 or arxiv:1207.7235',
+      'refersto:recid:451647',
+    ])(`${definition.name} keeps valid filtered selection for %s`, async (query) => {
+      h.route('/literature', (request) => {
+        const params = new URL(request.url).searchParams;
+        if (params.has('format')) return textResponse(exportBody(BIBTEX_ENTRIES));
+        return jsonResponse(
+          params.get('fields') === 'control_number'
+            ? literaturePage([{ control_number: 1124337, document_type: ['article'] }])
+            : literaturePage(),
+        );
+      });
+      const result = await runToolContract(definition, {
+        query,
+        document_types: ['published'],
+        size: 1,
+      });
+      expect(result.isError).toBeFalsy();
+      const output = structured<{ papers?: unknown[]; entries?: unknown[] }>(result);
+      expect(output.papers ?? output.entries).toHaveLength(1);
+      expect(h.requests).toHaveLength(2);
+      expect(h.requests.every((request) => request.params.get('q') === query)).toBe(true);
+    });
+
+    it(`${definition.name} keeps later unfiltered reference fallback within the verified count`, async () => {
+      h.route('/literature', (request) =>
+        new URL(request.url).searchParams.has('format')
+          ? textResponse(exportBody(BIBTEX_ENTRIES.slice(0, 1)))
+          : jsonResponse(literaturePage([literatureMetadata()], { total: 2 })),
+      );
+      const result = await runToolContract(definition, {
+        query: 'Bibliographic reference',
+        page: 2,
+        size: 1,
+        sort: 'mostcited',
+      });
+      const output = structured<{ papers?: unknown[]; entries?: unknown[] }>(result);
+      expect(output.papers ?? output.entries).toHaveLength(1);
+      expect(fullText(result)).toMatch(/Observation of a new particle|ATLAS:2012/);
+      expect(h.requests).toHaveLength(2);
+    });
+
+    it.each([
+      { document_types: ['thesis'] },
+      { document_types: ['published', 'thesis'] },
+      { subjects: ['Theory-HEP', 'Experiment-HEP'] },
+      { year_to: 2011 },
+    ])(`${definition.name} suppresses a required-title fallback under %j`, async (filters) => {
+      const query = '(arxiv:1207.7214 or doi:10.1016/j.physletb.2012.08.020)';
+      h.route('/literature', (request) => {
+        const params = new URL(request.url).searchParams;
+        if (params.has('format')) return textResponse(exportBody(BIBTEX_ENTRIES));
+        return jsonResponse(
+          literaturePage([
+            { control_number: 1124337, titles: [{ title: 'Required fallback title' }] },
+          ]),
+        );
+      });
+      const result = await runToolContract(definition, { query, size: 1, ...filters });
+      expect(result.isError).toBeFalsy();
+      const output = structured<{
+        papers?: unknown[];
+        entries?: unknown[];
+        totalCount?: number;
+        truncated: boolean;
+      }>(result);
+      expect(output.papers ?? output.entries).toEqual([]);
+      expect(output.truncated).toBe(false);
+      expect(fullText(result)).not.toContain('Required fallback title');
+      expect(fullText(result)).not.toContain('ATLAS:2012yve');
+      expect(h.requests).toHaveLength(2);
+      expect(h.requests.every((request) => request.params.get('q') === query)).toBe(true);
+      const count = h.requests.find((request) => request.params.get('fields') === 'control_number');
+      expect(count).toBeDefined();
+      expect(count?.params.has('page')).toBe(false);
+      for (const key of ['doc_type', 'subject', 'earliest_date']) {
+        expect(count?.params.getAll(key)).toEqual(h.requests[0]?.params.getAll(key));
+      }
+    });
+
+    it(`${definition.name} suppresses a repeated exhausted page and keeps its verified total`, async () => {
+      h.route('/literature', (request) =>
+        new URL(request.url).searchParams.has('format')
+          ? textResponse(exportBody(BIBTEX_ENTRIES))
+          : jsonResponse(literaturePage()),
+      );
+      const result = await runToolContract(definition, {
+        query: 'arxiv:1207.7214',
+        page: 2,
+        size: 1,
+        sort: 'mostcited',
+      });
+      const output = structured<{
+        papers?: unknown[];
+        entries?: unknown[];
+        totalCount?: number;
+        truncated: boolean;
+      }>(result);
+      expect(output.papers ?? output.entries).toEqual([]);
+      expect(output.truncated).toBe(false);
+      expect(h.requests).toHaveLength(2);
+      expect(fullText(result)).not.toContain('Observation of a new particle');
+    });
+
+    it(`${definition.name} propagates required verification failure on both surfaces`, async () => {
+      h.route('/literature', (request) => {
+        const params = new URL(request.url).searchParams;
+        if (params.get('fields') === 'control_number')
+          return jsonResponse(badRequestBody('Count [bad](https://example.org) <value>.'), {
+            status: 400,
+          });
+        return params.has('format')
+          ? textResponse(exportBody(BIBTEX_ENTRIES))
+          : jsonResponse(literaturePage());
+      });
+      const result = await runToolContract(definition, { query: 'arxiv:1207.7214', year_to: 2011 });
+      const error = errorEnvelope(result);
+      expect(error.data?.reason).toBe('invalid_query');
+      expect(error.message).toBe(
+        'INSPIRE rejected the request: Count [bad](https://example.org) <value>.',
+      );
+      expect(fullText(result)).toContain('Count \\[bad\\]');
+      expect(fullText(result)).not.toContain('ATLAS:2012yve');
+    });
+  }
 });

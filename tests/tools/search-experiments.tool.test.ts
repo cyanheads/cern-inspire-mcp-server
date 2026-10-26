@@ -89,6 +89,62 @@ const errors = searchExperimentsTool.errors ?? [];
 const hint = (reason: string) => errors.find((e) => e.reason === reason)?.recovery;
 
 describe('input', () => {
+  it('advertises budgets above the result ceiling', () => {
+    const schema = searchExperimentsTool.input.toJSONSchema({ io: 'input' });
+    const budget = schema.properties?.limit;
+    expect(budget).toMatchObject({ type: 'integer', minimum: 1 });
+    expect(budget).not.toHaveProperty('maximum', 25);
+    expect(searchExperimentsTool.input.safeParse({ query: 'x', limit: 1000000 }).success).toBe(
+      true,
+    );
+  });
+
+  it.each([
+    [1, 1, false],
+    [25, 25, false],
+    [25, 26, true],
+  ] as const)(
+    'keeps the reduction notice with %i shown and %i matched',
+    async (shown, total, truncated) => {
+      routePage(pageOf(shown, { total }));
+      const result = await run({ query: 'ATLAS', limit: 26 });
+      const out = structured<Output>(result);
+      expect(out).toMatchObject({ cap: 25, shown, totalCount: total, truncated });
+      expect(out.notice).toContain('limit 26 reduced to 25.');
+      expect(fullText(result)).toContain('limit 26 reduced to 25.');
+      expect(fullText(result)).toContain(`**shown:** ${shown}`);
+      expect(params()?.get('size')).toBe('25');
+      if (truncated) {
+        expect(out.notice).toContain('use a more specific name');
+      }
+      expect(out.notice).not.toContain('raise limit');
+    },
+  );
+
+  it.each([25, 26, 1000000])(
+    'accepts budget %i and discloses reductions on an empty result',
+    async (requested) => {
+      routePage(emptyBody());
+      const result = await run({ query: 'Nobody', limit: requested });
+      const out = structured<Output>(result);
+      expect(out).toMatchObject({ cap: 25, shown: 0, truncated: false });
+      expect(params()?.get('size')).toBe('25');
+      if (requested > 25) {
+        expect(out.notice).toContain(`limit ${requested} reduced to 25`);
+        expect(fullText(result)).toContain(`limit ${requested} reduced to 25`);
+      }
+      expect(out.notice).toContain('Nobody');
+    },
+  );
+
+  it('preserves a seven-result budget on an empty response', async () => {
+    routePage(emptyBody());
+    const result = await run({ query: 'Nobody', limit: 7 });
+    expect(structured<Output>(result)).toMatchObject({ cap: 7, shown: 0, truncated: false });
+    expect(params()?.get('size')).toBe('7');
+    expect(fullText(result)).toContain('Nobody');
+  });
+
   it('applies the default limit and sends only q, fields, and size', async () => {
     routePage();
 
@@ -136,7 +192,6 @@ describe('input', () => {
     ['a query over 200 characters', { query: 'x'.repeat(201) }],
     ['a boolean query', { query: true }],
     ['limit 0', { query: 'ATLAS', limit: 0 }],
-    ['limit 26', { query: 'ATLAS', limit: 26 }],
     ['a negative limit', { query: 'ATLAS', limit: -1 }],
     ['a fractional limit', { query: 'ATLAS', limit: 2.5 }],
     ['a limit given as text', { query: 'ATLAS', limit: '5' }],

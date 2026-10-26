@@ -211,7 +211,7 @@ export const searchLiteratureTool = tool('cern_inspire_search_literature', {
       .min(1)
       .max(1000)
       .describe(
-        'INSPIRE query syntax or free text. Common operators: "a Jane.Doe.1" or "a Doe, J" (author), "t higgs boson" (title words), "cn atlas" or "collaboration:atlas" (collaboration), "date > 2015", "topcite 500+" (cited 500+ times), "refersto:recid:451647" (papers citing a record), "citedby:recid:451647" (its references), "j Phys.Rev.Lett." (journal), "eprint 1207.7214"; combine with and/or/not. Bare words search all fields. Empty recognized field clauses such as "a:" are invalid; other syntax is passed to INSPIRE without complete grammar validation. See cern_inspire_list_reference topic search_syntax.',
+        'INSPIRE query syntax or free text. Common operators: "a Jane.Doe.1" or "a Doe, J" (author), "t higgs boson" (title words), "cn atlas" or "collaboration:atlas" (collaboration), "date > 2015", "topcite 500+" (cited 500+ times), "refersto:recid:451647" (papers citing a record), "citedby:recid:451647" (its references), "j Phys.Rev.Lett." (journal), "eprint 1207.7214"; combine with and/or/not. Bare words search all fields. Empty recognized field clauses such as a: or a:"" (including whitespace-only quoted values) are invalid; other syntax is passed to INSPIRE without complete grammar validation. See cern_inspire_list_reference topic search_syntax.',
       ),
     sort: blankAsUnset(z.enum(SORTS).default('relevance')).describe(
       'Result order: relevance (default), mostrecent, or mostcited.',
@@ -221,10 +221,10 @@ export const searchLiteratureTool = tool('cern_inspire_search_literature', {
     year_from: yearFromInput,
     year_to: yearToInput,
     page: blankAsUnset(z.number().int().min(1).default(1)).describe(
-      'Page number, starting at 1. page × size may not exceed 10,000.',
+      'Page number, starting at 1. page × effective size (after clamping) may not exceed 10,000.',
     ),
-    size: blankAsUnset(z.number().int().min(1).max(100).default(10)).describe(
-      'Papers per page (1–100, default 10).',
+    size: blankAsUnset(z.number().int().min(1).default(10)).describe(
+      'Papers per page (positive integer, default 10; above 100 uses 100).',
     ),
   }),
   output: z.object({
@@ -232,7 +232,7 @@ export const searchLiteratureTool = tool('cern_inspire_search_literature', {
       .array(literatureHitSchema)
       .describe('The papers on this page, in the requested order.'),
     page: z.number().describe('The page returned.'),
-    size: z.number().describe('The page size requested.'),
+    size: z.number().describe('The effective page size after clamping.'),
     hasMore: z.boolean().describe('True when INSPIRE has a further page of results.'),
   }),
   enrichment: {
@@ -259,7 +259,7 @@ export const searchLiteratureTool = tool('cern_inspire_search_literature', {
     {
       reason: 'beyond_result_window',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'page × size exceeds the 10,000 results INSPIRE serves for one query.',
+      when: 'page × effective size (after clamping) exceeds the 10,000 results INSPIRE serves for one query.',
       recovery:
         'Narrow the query with year_from/year_to, document_types, or tighter terms until it matches under 10,000 records, then page again with cern_inspire_search_literature.',
       severity: 'notice',
@@ -309,7 +309,10 @@ export const searchLiteratureTool = tool('cern_inspire_search_literature', {
     },
   ],
 
-  async handler(input, ctx) {
+  async handler(requested, ctx) {
+    const input = { ...requested, size: Math.min(requested.size, 100) };
+    const reduction =
+      requested.size > input.size ? `size ${requested.size} reduced to ${input.size}.` : undefined;
     const filters: FacetFilters = {
       documentTypes: input.document_types,
       subjects: input.subjects,
@@ -358,7 +361,7 @@ export const searchLiteratureTool = tool('cern_inspire_search_literature', {
       page: input.page,
     });
 
-    const notices: string[] = [];
+    const notices: string[] = reduction ? [reduction] : [];
     if (result.papers.length === 0) {
       notices.push(...zeroHitNotice(input, result.total, filters));
     } else if (result.total > BROAD_MATCH_THRESHOLD) {

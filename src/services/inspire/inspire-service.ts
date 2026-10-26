@@ -19,7 +19,7 @@ import {
   validationError,
 } from '@cyanheads/mcp-ts-core/errors';
 import { createPacer, type Pacer, withRetry } from '@cyanheads/mcp-ts-core/utils';
-import { inline } from '@/utils/render.js';
+import { errorText } from '@/utils/render.js';
 import { type BoundedResponse, fetchBounded } from '../http/fetch-bounded.js';
 import {
   type AuthorRoute,
@@ -131,6 +131,13 @@ const PAPER_DOSSIER_FIELDS = [
   'authors.affiliations.value',
   'authors.record',
   'authors.ids',
+  'authors.inspire_roles',
+  'documents.url',
+  'documents.filename',
+  'documents.description',
+  'documents.material',
+  'documents.fulltext',
+  'documents.hidden',
   'author_count',
   'collaborations',
   'accelerator_experiments',
@@ -506,25 +513,55 @@ export class InspireService {
     params: LiteratureSearchParams,
     call: InspireCall,
   ): Promise<LiteratureSearchPage> {
+    const filters = facetParams(params);
+    const verify = params.page > 1 || Object.keys(filters).length > 0;
+    const [envelope, verifiedTotal] = await Promise.all([
+      this.send(
+        '/literature',
+        {
+          q: params.query,
+          sort: sortParam(params.sort),
+          size: params.size,
+          page: params.page,
+          fields: LITERATURE_SEARCH_FIELDS,
+          ...filters,
+        },
+        call,
+        'searchLiterature',
+        parseSearchEnvelope<RawLiteratureMetadata>,
+      ),
+      verify ? this.literatureTotal(params, call, 'searchLiteratureTotal') : undefined,
+    ]);
+    const total = verifiedTotal ?? envelope.hits.total;
+    const offset = (params.page - 1) * params.size;
+    return {
+      total,
+      hasMore: Boolean(envelope.links?.next) && (!verify || offset + params.size < total),
+      papers: !verify || offset < total ? envelope.hits.hits.map(toLiteratureHit) : [],
+    };
+  }
+
+  /**
+   * Verifies a filtered or paged selection without rewriting its query. INSPIRE's
+   * reference fallback discards source selection: required `titles` reappear
+   * despite `fields=control_number`. Under semantic filters that means no
+   * selected hits; without filters the fallback's count remains useful.
+   */
+  private async literatureTotal(
+    params: LiteratureSearchParams | CitationExportParams,
+    call: InspireCall,
+    operation: string,
+  ): Promise<number> {
+    const filters = facetParams(params);
     const envelope = await this.send(
       '/literature',
-      {
-        q: params.query,
-        sort: sortParam(params.sort),
-        size: params.size,
-        page: params.page,
-        fields: LITERATURE_SEARCH_FIELDS,
-        ...facetParams(params),
-      },
+      { q: params.query, fields: 'control_number', size: 1, ...filters },
       call,
-      'searchLiterature',
+      operation,
       parseSearchEnvelope<RawLiteratureMetadata>,
     );
-    return {
-      total: envelope.hits.total,
-      hasMore: Boolean(envelope.links?.next),
-      papers: envelope.hits.hits.map(toLiteratureHit),
-    };
+    const fallback = envelope.hits.hits.some((hit) => hit.metadata?.titles !== undefined);
+    return Object.keys(filters).length > 0 && fallback ? 0 : envelope.hits.total;
   }
 
   /**
@@ -719,9 +756,9 @@ export class InspireService {
    * search on the same query in parallel for the match total. The total sets
    * `truncated`, and a page at or past it returns no entries, because INSPIRE
    * answers a past-the-end page of an OR query with a leftover entry. A failed
-   * total request never fails the page: the page returns as INSPIRE sent it, with
-   * no `total`, unless the call was cancelled. Zero matches is an empty body and
-   * an empty `entries`.
+   * total request fails the call. Filtered first pages also verify the selection
+   * in parallel, because INSPIRE reference fallback can bypass those filters.
+   * Unfiltered first pages retain the one-request probe and reference matching.
    */
   async exportCitations(params: CitationExportParams, call: InspireCall): Promise<CitationExport> {
     const exportPage = async (size: number, page?: number) =>
@@ -743,34 +780,21 @@ export class InspireService {
         params.format,
       );
 
-    if (params.page === 1) {
+    if (params.page === 1 && Object.keys(facetParams(params)).length === 0) {
       const entries = await exportPage(params.size + 1);
       return { entries: entries.slice(0, params.size), truncated: entries.length > params.size };
     }
 
-    const [page, count] = await Promise.allSettled([
-      exportPage(params.size, params.page),
-      this.send(
-        '/literature',
-        { q: params.query, fields: 'control_number', size: 1, ...facetParams(params) },
-        call,
-        'exportCitationsTotal',
-        parseSearchEnvelope<RawLiteratureMetadata>,
+    const [page, total] = await Promise.all([
+      exportPage(
+        params.page === 1 ? params.size + 1 : params.size,
+        params.page === 1 ? undefined : params.page,
       ),
+      this.literatureTotal(params, call, 'exportCitationsTotal'),
     ]);
-    if (page.status === 'rejected') throw page.reason;
-    if (count.status === 'rejected') {
-      if (call.ctx.signal.aborted) throw count.reason;
-      call.ctx.log.warning('Citation export total lookup failed; returning the page unchecked', {
-        page: params.page,
-        error: count.reason instanceof Error ? count.reason.message : String(count.reason),
-      });
-      return { entries: page.value, truncated: page.value.length === params.size };
-    }
-    const total = count.value.hits.total;
     const offset = (params.page - 1) * params.size;
     return {
-      entries: offset < total ? page.value : [],
+      entries: offset < total ? page.slice(0, params.size) : [],
       total,
       truncated: offset + params.size < total,
     };
@@ -1059,9 +1083,9 @@ export class InspireService {
     });
     if (response.status === 400) {
       const message = upstreamMessage(response.text);
-      // The error text reaches content[]: one line, with markup and invisible characters neutralized.
+      // The framework escapes the raw message once when building content[].
       throw validationError(
-        `INSPIRE rejected the request: ${inline(message).replace(/\s+/g, ' ')}`,
+        `INSPIRE rejected the request: ${errorText(message).replace(/\s+/g, ' ')}`,
         {
           reason: 'invalid_query',
           upstreamMessage: message,

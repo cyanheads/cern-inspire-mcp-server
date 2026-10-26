@@ -1,0 +1,34 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "cern-inspire-mcp-server",
+  "version": "0.1.3",
+  "description": "Search INSPIRE-HEP papers, authors, experiments, HEPData records; get citation metrics and BibTeX via MCP. STDIO or Streamable HTTP.",
+  "author": {
+    "name": "Casey Hand",
+    "email": "casey@caseyjhand.com",
+    "url": "https://caseyjhand.com"
+  },
+  "homepage": "https://github.com/cyanheads/cern-inspire-mcp-server#readme",
+  "repository": "https://github.com/cyanheads/cern-inspire-mcp-server",
+  "license": "Apache-2.0",
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "typescript",
+    "bun",
+    "stdio",
+    "streamable-http",
+    "cern",
+    "inspire",
+    "inspirehep",
+    "hepdata",
+    "high-energy-physics",
+    "particle-physics",
+    "scholarly-literature",
+    "citations",
+    "bibtex",
+    "h-index",
+    "arxiv"
+  ]
+}

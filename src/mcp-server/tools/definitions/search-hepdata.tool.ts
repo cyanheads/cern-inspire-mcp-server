@@ -130,10 +130,10 @@ export const searchHepdataTool = tool('cern_inspire_search_hepdata', {
       'Result order: relevance (default) or mostrecent.',
     ),
     page: blankAsUnset(z.number().int().min(1).default(1)).describe(
-      'Page number, starting at 1. page × size may not exceed 10,000.',
+      'Page number, starting at 1. page × effective size (after clamping) may not exceed 10,000.',
     ),
-    size: blankAsUnset(z.number().int().min(1).max(50).default(10)).describe(
-      'Records per page (1–50, default 10).',
+    size: blankAsUnset(z.number().int().min(1).default(10)).describe(
+      'Records per page (positive integer, default 10; above 50 uses 50).',
     ),
   }),
   output: z.object({
@@ -141,7 +141,7 @@ export const searchHepdataTool = tool('cern_inspire_search_hepdata', {
       .array(hepdataRecordSchema)
       .describe('The HEPData records on this page, in the requested order.'),
     page: z.number().describe('The page returned.'),
-    size: z.number().describe('The page size requested.'),
+    size: z.number().describe('The effective page size after clamping.'),
     hasMore: z.boolean().describe('True when INSPIRE has a further page of results.'),
   }),
   enrichment: {
@@ -164,7 +164,7 @@ export const searchHepdataTool = tool('cern_inspire_search_hepdata', {
     {
       reason: 'beyond_result_window',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'page × size exceeds the 10,000 results INSPIRE serves for one query.',
+      when: 'page × effective size (after clamping) exceeds the 10,000 results INSPIRE serves for one query.',
       recovery:
         'Narrow the query with tighter terms, a collaborations.value:NAME clause, or an energy until it matches under 10,000 records, then page again with cern_inspire_search_hepdata.',
       severity: 'notice',
@@ -206,7 +206,10 @@ export const searchHepdataTool = tool('cern_inspire_search_hepdata', {
     },
   ],
 
-  async handler(input, ctx) {
+  async handler(requested, ctx) {
+    const input = { ...requested, size: Math.min(requested.size, 50) };
+    const reduction =
+      requested.size > input.size ? `size ${requested.size} reduced to ${input.size}.` : undefined;
     ctx.enrich({ truncated: false, shown: 0, cap: input.size });
     ctx.enrich.total(0);
 
@@ -231,7 +234,7 @@ export const searchHepdataTool = tool('cern_inspire_search_hepdata', {
       page: input.page,
     });
 
-    const notices: string[] = [];
+    const notices: string[] = reduction ? [reduction] : [];
     if (result.records.length === 0) {
       notices.push(
         result.total > 0

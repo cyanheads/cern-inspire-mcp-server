@@ -89,6 +89,93 @@ const routeBibtex = (entries: readonly string[] = BIBTEX_ENTRIES) =>
 const params = () => h.requests[0]?.params;
 
 describe('input', () => {
+  it('advertises budgets above the result ceiling', () => {
+    const schema = exportCitationsTool.input.toJSONSchema({ io: 'input' });
+    const budget = schema.properties?.size;
+    expect(budget).toMatchObject({ type: 'integer', minimum: 1 });
+    expect(budget).not.toHaveProperty('maximum', 50);
+    expect(exportCitationsTool.input.safeParse({ query: 'x', size: 1000000 }).success).toBe(true);
+  });
+
+  it('retains the reduction notice on a short export', async () => {
+    routeBibtex(BIBTEX_ENTRIES.slice(0, 1));
+    const result = await run({ query: 'x', size: 51 });
+    expect(structured<Output>(result)).toMatchObject({ cap: 50, shown: 1, truncated: false });
+    expect(fullText(result)).toContain('size 51 reduced to 50.');
+    expect(fullText(result)).toContain('**shown:** 1');
+  });
+
+  it.each(['bibtex', 'latex-eu', 'latex-us'] as const)(
+    'walks capped %s exports beyond the first page with aligned requests and notices',
+    async (format) => {
+      h.route('/literature', pagedLiterature(HIGGS_REFERENCE_TEXKEYS));
+      const results: ToolResult[] = [];
+      for (const page of [1, 2, 3, 4]) {
+        results.push(await run({ query: 'x', page, size: 51, format }));
+      }
+      const outs = results.map((result) => structured<Output>(result));
+      expect(outs.map((out) => out.shown)).toEqual([50, 50, 38, 0]);
+      expect(outs.map((out) => out.truncated)).toEqual([true, true, false, false]);
+      expect(outs.map((out) => out.nextPage)).toEqual([2, 3, undefined, undefined]);
+      expect(outs.flatMap((out) => out.entries.map((entry) => entry.texkey))).toEqual(
+        HIGGS_REFERENCE_TEXKEYS,
+      );
+      for (const result of results) {
+        expect(structured<Output>(result).notice).toContain('size 51 reduced to 50.');
+        expect(fullText(result)).toContain('size 51 reduced to 50.');
+      }
+      expect(outs[3]?.notice).toContain('last page (3)');
+      const textRequests = h.requests.filter((request) => request.params.has('format'));
+      expect(textRequests.map((request) => request.params.get('size'))).toEqual([
+        '51',
+        '50',
+        '50',
+        '50',
+      ]);
+    },
+  );
+
+  it('uses the effective size at the export window edge without offering page 201', async () => {
+    const keys = Array.from({ length: 10000 }, (_, i) => `Doe:${i + 1}`);
+    h.route('/literature', pagedLiterature(keys, { total: 20000 }));
+    const result = await run({ query: 'x', page: 200, size: 1000000 });
+    const out = structured<Output>(result);
+    expect(out).toMatchObject({ cap: 50, shown: 50, truncated: true });
+    expect(out.nextPage).toBeUndefined();
+    expect(out.notice).toContain('size 1000000 reduced to 50.');
+    expect(fullText(result)).toContain('narrow it');
+    expect(out.notice).not.toContain('request page');
+    const count = h.requests.length;
+    const refused = await run({ query: 'x', page: 201, size: 1000000 });
+    expect(errorEnvelope(refused).data).toMatchObject({ reason: 'beyond_result_window', size: 50 });
+    expect(fullText(refused)).toContain('beyond_result_window');
+    expect(h.requests).toHaveLength(count);
+  });
+
+  it.each([50, 51, 1000000])(
+    'accepts budget %i and discloses reductions on an empty result',
+    async (requested) => {
+      routeBibtex([]);
+      const result = await run({ query: 'Nobody', size: requested });
+      const out = structured<Output>(result);
+      expect(out).toMatchObject({ cap: 50, shown: 0, truncated: false });
+      expect(params()?.get('size')).toBe('51');
+      if (requested > 50) {
+        expect(out.notice).toContain(`size ${requested} reduced to 50`);
+        expect(fullText(result)).toContain(`size ${requested} reduced to 50`);
+      }
+      expect(out.notice).toContain('Nobody');
+    },
+  );
+
+  it('preserves a seven-result budget on an empty response', async () => {
+    routeBibtex([]);
+    const result = await run({ query: 'Nobody', size: 7 });
+    expect(structured<Output>(result)).toMatchObject({ cap: 7, shown: 0, truncated: false });
+    expect(params()?.get('size')).toBe('8');
+    expect(fullText(result)).toContain('Nobody');
+  });
+
   it('applies the defaults: bibtex, relevance, page 1 of ten entries, one request as size 11', async () => {
     routeBibtex();
 
@@ -141,7 +228,6 @@ describe('input', () => {
     ['the unsuffixed latex format', { query: 'x', format: 'latex' }],
     ['an unknown sort', { query: 'x', sort: 'newest' }],
     ['size 0', { query: 'x', size: 0 }],
-    ['size 51', { query: 'x', size: 51 }],
     ['a fractional size', { query: 'x', size: 1.5 }],
     ['a negative size', { query: 'x', size: -5 }],
     ['page 0', { query: 'x', page: 0 }],
@@ -397,8 +483,6 @@ describe('required enrichment', () => {
 
 describe('paging', () => {
   const CITED_BY_HIGGS = 'citedby:recid:1124337';
-  const UNCHECKED =
-    "INSPIRE's match count could not be read, so this page is unchecked against it: past the last page, INSPIRE can return an entry from an earlier page again (it does for OR queries).";
 
   /** Routes exports to the short-page fake over the Higgs references, and the total search to `totalReply`. */
   const routeTotalReply = (totalReply: () => Response) => {
@@ -595,46 +679,33 @@ describe('paging', () => {
     });
   });
 
-  it('returns a full page and its nextPage when the total request fails, saying the page is unchecked', async () => {
+  it('rejects a full page when its required total request fails', async () => {
     routeTotalReply(refused);
 
     const result = await run({ query: CITED_BY_HIGGS, page: 2, size: 50 });
 
-    const out = structured<Output>(result);
-    expect(out.entries.map((e) => e.texkey)).toEqual(HIGGS_REFERENCE_TEXKEYS.slice(50, 100));
-    expect(out).toMatchObject({
-      truncated: true,
-      nextPage: 3,
-      notice: `This page came back full; request page 3 for any further entries. ${UNCHECKED}`,
-    });
-    expect(fullText(result)).toContain(`> This page came back full; request page 3`);
-    expect(fullText(result)).toContain('**Next page:** 3');
+    expect(errorEnvelope(result).data?.reason).toBe('invalid_query');
+    expect(fullText(result)).toContain('INSPIRE rejected the request');
+    expect(fullText(result)).not.toContain('ATLAS:2012ac');
   });
 
-  it('reads a short page under a failed total as the last, still saying it is unchecked', async () => {
+  it('rejects a short page when its required total is unreadable', async () => {
     const outcome = await settleWithFakeTimers(async () => {
       routeTotalReply(() => htmlResponse());
       return await run({ query: CITED_BY_HIGGS, page: 3, size: 50 });
     });
     if (!outcome.ok) throw outcome.error;
 
-    const out = structured<Output>(outcome.value);
-    expect(out.entries).toHaveLength(38);
-    expect(out).toMatchObject({ truncated: false, notice: UNCHECKED });
-    expect(out.nextPage).toBeUndefined();
+    expect(errorEnvelope(outcome.value).data?.reason).toBe('upstream_unreadable');
+    expect(fullText(outcome.value)).toContain('HTML page');
   });
 
-  it('says an empty page under a failed total is past the end or a no-match', async () => {
+  it('rejects an empty page when its required total request fails', async () => {
     routeTotalReply(refused);
 
-    const out = structured<Output>(await run({ query: CITED_BY_HIGGS, page: 4, size: 50 }));
-
-    expect(out).toMatchObject({
-      entries: [],
-      truncated: false,
-      notice:
-        "Page 4 came back empty and INSPIRE's match count could not be read, so either it is past the last page or nothing matched; request page 1 to tell which.",
-    });
+    const result = await run({ query: CITED_BY_HIGGS, page: 4, size: 50 });
+    expect(errorEnvelope(result).data?.reason).toBe('invalid_query');
+    expect(fullText(result)).toContain('INSPIRE rejected the request');
   });
 
   it('fails with invalid_query when INSPIRE refuses the page, though the total answered', async () => {

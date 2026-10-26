@@ -275,6 +275,7 @@ function toPaperAuthor(
   return [
     {
       name,
+      ...(author.inspire_roles === undefined ? {} : { roles: strings(author.inspire_roles) }),
       ...opt('recid', recidFromRef(author.record)),
       ...opt('bai', idOf(author.ids, 'INSPIRE BAI')),
       ...opt('orcid', idOf(author.ids, 'ORCID')),
@@ -329,6 +330,20 @@ export function toPaperLookup(
       authorOffset,
       ...(page.length > 0 && nextOffset < authors.length ? { nextAuthorOffset: nextOffset } : {}),
       authors: page,
+      documents: (m.documents ?? []).flatMap((document) => {
+        const url = str(document.url);
+        return document.hidden === true || url === undefined
+          ? []
+          : [
+              {
+                url,
+                ...opt('filename', str(document.filename)),
+                ...opt('description', str(document.description)),
+                ...opt('material', str(document.material)),
+                ...opt('fulltext', bool(document.fulltext)),
+              },
+            ];
+      }),
       collaborations: values(m.collaborations),
       experiments: (m.accelerator_experiments ?? []).flatMap((e) => {
         const name = str(e.legacy_name);

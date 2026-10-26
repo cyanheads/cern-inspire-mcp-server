@@ -243,8 +243,8 @@ export const searchAuthorsTool = tool('cern_inspire_search_authors', {
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     query: authorQueryInput,
-    limit: blankAsUnset(z.number().int().min(1).max(MAX_LIMIT).default(5)).describe(
-      `Profiles to return (1–${MAX_LIMIT}, default 5).`,
+    limit: blankAsUnset(z.number().int().min(1).default(5)).describe(
+      'Profiles to return (positive integer, default 5; above 25 uses 25).',
     ),
   }),
   output: z.object({
@@ -305,7 +305,12 @@ export const searchAuthorsTool = tool('cern_inspire_search_authors', {
     },
   ],
 
-  async handler(input, ctx) {
+  async handler(requested, ctx) {
+    const input = { ...requested, limit: Math.min(requested.limit, MAX_LIMIT) };
+    const reduction =
+      requested.limit > input.limit
+        ? `limit ${requested.limit} reduced to ${input.limit}.`
+        : undefined;
     ctx.enrich({ truncated: false, shown: 0, cap: input.limit, matchedAs: 'name' });
     ctx.enrich.total(0);
 
@@ -322,7 +327,7 @@ export const searchAuthorsTool = tool('cern_inspire_search_authors', {
     });
 
     const truncated = result.total > shown + result.deletedDropped;
-    const notices: string[] = [];
+    const notices: string[] = reduction ? [reduction] : [];
     if (
       result.matchedAs === 'name' &&
       shown > 0 &&

@@ -2,9 +2,9 @@
 
 **Server:** cern-inspire-mcp-server
 **Version:** 0.1.3
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.15`
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.18`
 **Engines:** Bun ≥1.4.0, Node ≥24.0.0
-**MCP SDK:** `@modelcontextprotocol/server` ^2.3.1
+**MCP SDK:** `@modelcontextprotocol/server` ^2.4.0
 **Zod:** ^4.6.7
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
@@ -15,21 +15,21 @@
 
 ## Domain
 
-Eight read-only tools and one resource over INSPIRE-HEP's keyless REST API (`https://inspirehep.net/api`). HEPData is reached only through INSPIRE's `data` collection; no request goes to hepdata.net, whose bot challenge refuses the server's User-Agent (design § Design Decisions #1). So the server reads no table values: `cern_inspire_get_paper` and `cern_inspire_search_hepdata` report each HEPData record's DOI, latest version, table count, and hepdata.net link.
+Eight read-only tools, one literature resource template, and one published agent skill over INSPIRE-HEP's keyless REST API (`https://inspirehep.net/api`). HEPData is reached only through INSPIRE's `data` collection; no request goes to hepdata.net, whose bot challenge refuses the server's User-Agent (design § Design Decisions #1). So the server reads no table values: `cern_inspire_get_paper` and `cern_inspire_search_hepdata` report each HEPData record's DOI, latest version, table count, and hepdata.net link.
 
 | Upstream path | Used by |
 |:--------------|:--------|
 | `/literature` (search, `fields`-selected) | `cern_inspire_search_literature`, `cern_inspire_get_paper` (arXiv and DOI resolution included), `inspire://literature/{recid}` |
 | `/literature/<recid>` (redirects not followed, after a `recid:N` search returns no hit: where INSPIRE sends a merged recid) | `cern_inspire_get_paper`, `inspire://literature/{recid}` |
-| `/literature` with `format=` (`bibtex`, `latex-eu`, `latex-us`), plus a `fields=control_number` search for the match total on a later page | `cern_inspire_export_citations` |
+| `/literature` with `format=` (`bibtex`, `latex-eu`, `latex-us`), plus a `fields=control_number` selection check on filtered first pages and every later page | `cern_inspire_export_citations` |
 | `/literature/facets` (`facet_name=citation-summary`, plus `citations-by-year` in parallel unless a year bound or the self-citation exclusion is set) | `cern_inspire_get_citation_summary` |
 | `/authors` | `cern_inspire_search_authors`, author resolution in `cern_inspire_get_citation_summary` |
 | `/experiments` | `cern_inspire_search_experiments` |
 | `/data` | `cern_inspire_search_hepdata`, the `hepdata` block of `cern_inspire_get_paper` |
 
-`cern_inspire_list_reference` serves static tables and makes no upstream call. There are no prompts.
+`cern_inspire_list_reference` serves static tables and makes no upstream call. There are no prompts. `skills/cern-inspire-guide/SKILL.md` ships through plugins, npm, Docker, and MCPB; `createApp({ skills: 'skills' })` serves `skills/list`, `skills/get`, `resources/directory/read`, the `skill://{+path}` template, and `skill://cern-inspire-guide/SKILL.md` in `resources/list`.
 
-Literature search, citation summaries, and citation export reject empty standalone recognized field clauses before upstream I/O through the shared quote-aware `hasEmptyQueryField` guard, using `invalid_query`; value negation, groups, quoted text, metadata paths and nested colon selectors remain valid. This is not complete grammar validation. Citation export reuses search's facet/year inputs, AND semantics and `appliedFilters` echo; identical `facetParams` accompany its text page and later-page count lookup. Reversed year bounds fail as `invalid_year_range` before requests. Page 1 remains one size+1 request; later page/count requests remain parallel.
+Literature search, citation summaries, and citation export reject empty standalone recognized field clauses, including empty or whitespace-only quoted values (`a:""`), before upstream I/O through the shared quote-aware `hasEmptyQueryField` guard, using `invalid_query`; value negation, groups, quoted text, metadata paths and nested colon selectors remain valid. This is not complete grammar validation. Citation export reuses search's facet/year inputs, AND semantics and `appliedFilters` echo; identical `facetParams` accompany its text page and required count lookup. Literature search verifies filtered selections and later pages; export verifies filtered first pages and later pages. The parallel `fields=control_number` count detects reference fallback through reappearing required `titles`: filtered fallback means zero selected matches, while unfiltered fallback retains its total. Pages at or beyond that total are discarded. A required count failure fails the call. Unfiltered first pages retain one request (export probes effective size + 1). Reversed year bounds fail as `invalid_year_range` before requests.
 
 `InspireService` (`src/services/inspire/inspire-service.ts`) owns every request: one process-wide pacer under INSPIRE's published 15 requests per 5 s per address (`limits: [{ requests: 12, perMs: 5_000 }]`, `maxConcurrent: 4`, a cooldown after a `429`), a series gate that lets at most two citations-by-year requests into that pacer at once (`maxConcurrent: 2`, since one holds a slot for up to 15 s), `withRetry` outside the pacer (2 retries), one 55 s budget per tool call opened by `beginCall(ctx)` and threaded through every request in the call, an 8 MiB byte ceiling through `fetchBounded` (`src/services/http/fetch-bounded.ts`), and a strict query-parameter allowlist, since INSPIRE silently ignores unknown parameters. There is no cache and no server-specific env var.
 
@@ -39,9 +39,11 @@ Conventions every definition follows:
 - **Honest User-Agent only.** `cern-inspire-mcp-server/<version> (+https://github.com/cyanheads/cern-inspire-mcp-server)`. Never add a `curl`, `Wget`, or `python-requests` token, and send nothing to hepdata.net.
 - **Never request `email_addresses`.** INSPIRE's terms bar collecting them in bulk; the author `fields` list leaves them out.
 - **Shared inputs** live in `src/mcp-server/tools/inputs.ts`: `blankAsUnset` wraps every optional or defaulted input; `paperInput`, `documentTypesInput` / `subjectsInput` (array or comma-joined string, case-folded, up to 4, values AND together), `yearFromInput` / `yearToInput`, `authorQueryInput` / `authorIdInput`, and the `formatAppliedFilters` echo. The advertised `inputSchema` must admit every spelling a description documents, and the input must parse it: `paperInput` checks its pattern in a `.refine()`, never `.regex()`, its description names the scheme on every URL form, and the facet descriptions document only the enum array (design § Design Decisions #31).
-- **Author paging.** `max_authors` accepts nonnegative integers (default/blank 25), clamped to 500 with a notice. `author_offset` is zero-based (default/blank 0) and slices the normalized available author list. Echo `authorOffset` and optional `nextAuthorOffset` on both surfaces; issue continuation only with positive progress and available authors remaining. Never derive continuation from `authorCount`; zero budget advises a positive budget. The resource remains first 25 at offset 0.
+- **Contributor dossier.** `authors[]` retains optional recorded `roles` without inferring an author role; `authorCount` remains upstream `author_count`, falling back to the normalized available contributor-list length. `documents[]` carries public attached-document URL and optional filename, description, material, and fulltext; omit hidden:true and URL-less entries, preserve fulltext:false, and never download files. Select only the six `documents.*` projections (including hidden), never the whole object or attachment content.
+- **Result budgets.** Positive integer size/limit inputs above their ceilings clamp with requested/effective notices, even for empty or short results: literature 100, HEPData and export 50, author and experiment search 25. Defaults and blank handling stay unchanged; zero, negative, fractional, and wrong-type inputs fail. All paging arithmetic, window checks, output size, and continuation use the effective budget.
+- **Contributor paging.** `max_authors` accepts nonnegative integers (default/blank 25), clamped to 500 with a notice. `author_offset` is zero-based (default/blank 0) and slices the normalized available contributor list. Echo `authorOffset` and optional `nextAuthorOffset` on both surfaces; issue continuation only with positive progress and available contributors remaining. Never derive continuation from `authorCount`; zero budget advises a positive budget. The resource remains first 25 at offset 0.
 - **Placeholders the server writes** in a notice, an `errors[]` recovery hint, or `format()` text outside a code span are uppercase words (`"t WORDS"`, `"a NAME"`, `collaborations.value:NAME`), never `<…>`, which a client rendering markdown to HTML drops as a tag. A code span prints `<…>` as written (list_reference's `HEPData ins<recid>` term), and `.describe()` text and the server instructions reach `tools/list` and `initialize`, not rendered markdown.
-- **Upstream text is data.** Every upstream or caller string in `format()` goes through `inline()`, `cell()`, `quote()`, `fenced()`, or `printUrl()` from `src/utils/render.ts`, and a list item that opens with one wraps it in `atLineStart()`; outside a `quote()` or `fenced()` block, no other line opens with upstream text. A caller's own query, author, or paper identifier echoed in a notice or error message goes through `callerEcho()`, which leaves `*`, `_`, `~`, and `>` as written so the echo can be sent back, and entity-encodes only a `<` that could open a tag, comment, or autolink; an identifier value a caller copies (DOI, record DOI, report number, texkey, arXiv ID, BAI, ORCID, INSPIRE ID, other ID) goes through `identifier()`, the same rules. `structuredContent` keeps each string as received with two exceptions: the service drops Unicode tag characters at decode, and `normalize.ts` converts titles and abstracts from publisher HTML/JATS/MathML to text with `markupToText()` (LaTeX left as published).
+- **Upstream text is data.** Every upstream or caller string in `format()` goes through `inline()`, `cell()`, `quote()`, `fenced()`, or `printUrl()` from `src/utils/render.ts`, and a list item that opens with one wraps it in `atLineStart()`; outside a `quote()` or `fenced()` block, no other line opens with upstream text. A caller's own query, author, or paper identifier echoed in a notice goes through `callerEcho()`, which leaves `*`, `_`, `~`, and `>` as written so the echo can be sent back, and entity-encodes only a `<` that could open a tag, comment, or autolink; an identifier value a caller copies (DOI, record DOI, report number, texkey, arXiv ID, BAI, ORCID, INSPIRE ID, other ID) goes through `identifier()`, the same rules. Error messages use `errorText()` for line/control hygiene before the framework escapes Markdown once. `structuredContent` keeps each string as received with two exceptions: the service drops Unicode tag characters at decode, and `normalize.ts` converts titles and abstracts from publisher HTML/JATS/MathML to text with `markupToText()` (LaTeX left as published).
 - **Required enrichment first.** A handler writes its required enrichment fields (`truncated` / `shown` / `cap`, `totalCount`, the echo strings) with neutral values before its first upstream call or branch, then overwrites them where the real value is known.
 - **Errors.** Every tool that reaches INSPIRE declares `inspire_rate_limited`, `pacer_shed`, and `upstream_unreadable` inline (`thrownBy: 'service'`), plus `invalid_query` when it sends a caller query; the resource declares the first three. Handler-side reasons (`paper_not_found`, `beyond_result_window`, `invalid_year_range`, `missing_target`, `author_not_identifier`, `author_not_found`) are thrown through `ctx.fail`, and tools mark caller-input reasons `severity: 'notice'`.
 - **No fabrication.** A field INSPIRE leaves out stays absent (`firstAuthor`, `ongoing`, `averageCitations`), and `format()` prints "Not available" or "not recorded" rather than a guess.
@@ -99,18 +101,18 @@ export const getPaperTool = tool('cern_inspire_get_paper', {
   input: z.object({
     paper: paperInput, // shared input: recid, arXiv ID, DOI, or URL forms, normalized in preprocess
     max_authors: blankAsUnset(z.number().int().min(0).default(25)).describe(
-      'Most authors to list (nonnegative integer, default 25; above 500 uses 500). The full count is always in authorCount.',
+      'Most contributors to list (nonnegative integer, default 25; above 500 uses 500). The upstream contributor count is in authorCount.',
     ),
     author_offset: blankAsUnset(z.number().int().min(0).default(0)).describe(
-      'Zero-based position in the normalized available author list; use nextAuthorOffset to continue.',
+      'Zero-based position in the normalized available contributor list; use nextAuthorOffset to continue.',
     ),
   }),
   output: paperDossierSchema, // also the inspire://literature/{recid} resource's output
   enrichment: {
-    truncated: z.boolean().describe('True when available authors remain after this page.'),
-    shown: z.number().describe('Number of authors listed.'),
+    truncated: z.boolean().describe('True when available contributors remain after this page.'),
+    shown: z.number().describe('Number of contributors listed.'),
     cap: z.number().describe('The max_authors cap applied.'),
-    notice: z.string().optional().describe('Guidance when the author list was capped or HEPData availability could not be checked.'),
+    notice: z.string().optional().describe('Guidance when the contributor list was capped or HEPData availability could not be checked.'),
   },
   errors: [
     {
@@ -204,6 +206,7 @@ await createApp({
   title: 'cern-inspire-mcp-server', // display identity is the machine name; lint:packaging checks the pair
   tools: allToolDefinitions,
   resources: allResourceDefinitions,
+  skills: 'skills',
   instructions: 'cern-inspire-mcp-server reads INSPIRE-HEP (inspirehep.net), …', // abridged
   setup(core) {
     initInspireService(core.config); // the User-Agent carries core.config.mcpServerVersion
@@ -309,7 +312,7 @@ src/
       types.ts                          # Raw upstream and normalized domain types
       vocabulary.ts                     # Document types, subjects, citation-bucket ranges
   utils/
-    render.ts                           # inline / cell / quote / fenced / printUrl / atLineStart / callerEcho for upstream and caller text in format(), notices, and error messages
+    render.ts                           # Output renderers and callerEcho for format()/notices; errorText before framework error escaping
 tests/
   fixtures/                             # INSPIRE bodies, service harness, shared failure suite, result readers
   tools/  resources/  services/  shared/  # Suites mirroring src/
@@ -332,9 +335,18 @@ docs/
 
 ## Skills
 
-Skills are modular instructions in `framework-skills/` at the project root. Read them directly when a task matches — e.g., `framework-skills/add-tool/SKILL.md` when adding a tool. `bun run list-skills` prints the full registry. The directory is deliberately not `skills/`: Claude Code and Codex auto-load a plugin's root `skills/`, so a server that ships `.claude-plugin/` or `.codex-plugin/` would hand these development skills to every agent that installs it. Keep `skills/` free for skills meant for those agents.
+Two skill trees live at the project root, written for different readers:
 
-**Agent skill directory:** Copy skills into the directory your agent discovers (Claude Code: `.claude/skills/`, others: equivalent). Skills then load as context without referencing `framework-skills/` paths. After framework updates, run the `maintenance` skill — Phase B re-syncs the agent directory.
+| Tree | For | Written by |
+|:-----|:----|:-----------|
+| `framework-skills/` | The agent developing this server — framework skills (`metadata.audience: external`) plus any development-time skills of the server's own | `init` and the `maintenance` sync (framework skills); you (your own) |
+| `skills/` | The agents that install the server and call its tools — tool chains, identifier sources, gates | `cern-inspire-guide`, authored with `add-skill` |
+
+Development skills are modular instructions. Read them directly when a task matches — e.g., `framework-skills/add-tool/SKILL.md` when adding a tool. `bun run list-skills` prints the full registry. Their directory is deliberately not `skills/`: Claude Code and Codex auto-load a plugin's root `skills/`, so a server that ships `.claude-plugin/` or `.codex-plugin/` would hand them to every agent that installs it.
+
+A published skill in root `skills/` reaches plugin installs and the `.mcpb` bundle as-is, ships in the npm package and the Docker image, and reaches MCP clients when the server opts in with `createApp({ skills: 'skills' })`. `lint:packaging` validates the tree.
+
+**Agent skill directory:** Copy `framework-skills/` into the directory your agent discovers (Claude Code: `.claude/skills/`, others: equivalent). Skills then load as context without referencing `framework-skills/` paths. After framework updates, run the `maintenance` skill — Phase B re-syncs the agent directory.
 
 Available skills:
 
@@ -346,6 +358,7 @@ Available skills:
 | `add-app-tool` | Scaffold an MCP App tool + paired UI resource |
 | `add-resource` | Scaffold a new resource definition |
 | `add-prompt` | Scaffold a new prompt definition |
+| `add-skill` | Author a skill the server publishes in root `skills/` for the agents that use it — when one earns its place, structure, validation, delivery |
 | `add-service` | Scaffold a new service integration |
 | `add-test` | Scaffold test file for a tool, resource, or service |
 | `field-test` | Exercise tools/resources/prompts with real inputs, verify behavior, report issues |
@@ -415,7 +428,7 @@ When you complete a skill's checklist, check the boxes and add a completion time
 
 ## Bundling
 
-`npm run bundle` produces a `.mcpb` extension bundle for one-click install in Claude Desktop. The pack step is followed by `scripts/clean-mcpb.ts`, which prunes dev dependencies (`mcpb clean`) and strips two classes of `node_modules/**` content that root-anchored `.mcpbignore` patterns cannot reach: dependency-shipped agent docs (`framework-skills/`, `skills/`, `.claude/`, `.agents/`, `SKILL.md`) and platform-specific native bindings, which would otherwise lock the bundle to the platform it was packed on. A server using DataCanvas therefore ships a portable bundle without the DuckDB native — `@duckdb/node-api` is an optional peer loaded lazily, so canvas tools report an actionable install hint and every other tool works normally. MCPB is stdio-only — HTTP and Cloudflare Workers deployments are unaffected. Consumers who don't need it can delete `manifest.json` and `.mcpbignore`; `lint:packaging` skips cleanly.
+`npm run bundle` produces a `.mcpb` extension bundle for one-click install in Claude Desktop. `mcpb pack` reads `.mcpbignore`, not `.gitignore`, so every root path the bundle must not ship — source, tests, docs, caches, logs, agent docs, plugin manifests, gitignored local files — needs a root-anchored line there (`/docs/`, never `docs/`, which also strips `node_modules/*/docs/`); `lint:packaging` names each missing or unanchored line. Root `skills/` ships on purpose. The pack step is followed by `scripts/clean-mcpb.ts`, which prunes dev dependencies (`mcpb clean`) and strips four classes of `node_modules/**` content that root-anchored `.mcpbignore` patterns cannot reach: dependency-shipped agent docs (`framework-skills/`, `skills/`, `.claude/`, `.agents/`, `SKILL.md`); platform-specific native bindings, which would otherwise lock the bundle to the platform it was packed on; node-gyp build output beside a `binding.gyp` (`config.gypi`, Makefiles, `obj.target/`, `.deps/`, object files and debug symbols), which records the packing machine's paths — compiled `*.node` addons stay; and build-only package files — the framework's `changelog/`, `scripts/`, `templates/`, `CLAUDE.md`, `AGENTS.md`, and config bases (`biome.json`, `vitest.config.base.mjs`, `config/tsconfig.base.json`), and `better-sqlite3`'s `deps/` and `src/` C sources. A server using DataCanvas therefore ships a portable bundle without the DuckDB native — `@duckdb/node-api` is an optional peer loaded lazily, so canvas tools report an actionable install hint and every other tool works normally. MCPB is stdio-only — HTTP and Cloudflare Workers deployments are unaffected. Consumers who don't need it can delete `manifest.json` and `.mcpbignore`; `lint:packaging` skips cleanly.
 
 **Adding an env var requires both files:** `server.json` (registry discovery, `environmentVariables[]`) and `manifest.json` (bundle install UX, `mcp_config.env` + `user_config`). `lint:packaging` (run by `devcheck`) verifies the env var names match, that every `user_config` option is wired into `mcp_config.env` as `"X": "${user_config.X}"` (the host substitutes nothing else — `"${X}"` reaches the server as that literal string), and that an optional string option carries `"default": ""`.
 

@@ -99,7 +99,7 @@ describe('400 and 429 mapping', () => {
     expect((error.data as { upstreamMessage: string }).upstreamMessage).toBe('x'.repeat(300));
   });
 
-  it('keeps a multi-line non-JSON 400 body raw in data, and flattens it to one line in the message', async () => {
+  it('keeps a multi-line non-JSON 400 body raw in data and flattens the unescaped message', async () => {
     const NEL = String.fromCharCode(0x85);
     const LS = String.fromCharCode(0x2028);
     const body = `<html>\r\n<head>\r\n<title>Bad request</title>\r\n</head>${NEL}<body>${LS}x</body>\n</html>`;
@@ -110,7 +110,7 @@ describe('400 and 429 mapping', () => {
     expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
     expect(error.data).toMatchObject({ reason: 'invalid_query', upstreamMessage: body });
     expect(error.message).toBe(
-      'INSPIRE rejected the request: &lt;html&gt; &lt;head&gt; &lt;title&gt;Bad request&lt;/title&gt; &lt;/head&gt; &lt;body&gt; x&lt;/body&gt; &lt;/html&gt;',
+      'INSPIRE rejected the request: <html> <head> <title>Bad request</title> </head> <body> x</body> </html>',
     );
     expect(error.message).not.toMatch(new RegExp(`[\\r\\n${NEL}${LS}]`));
   });
@@ -125,7 +125,7 @@ describe('400 and 429 mapping', () => {
     );
   });
 
-  it('cuts a long JSON 400 message to 300 characters and escapes its markup in the error text', async () => {
+  it('cuts a long JSON 400 message to 300 characters without pre-escaping its markup', async () => {
     const message = `[x](https://e) <b>bold</b> ${'y'.repeat(10_000)}`;
     h.route('/literature', jsonResponse(badRequestBody(message), { status: 400 }));
 
@@ -133,12 +133,10 @@ describe('400 and 429 mapping', () => {
 
     expect((error.data as { upstreamMessage: string }).upstreamMessage).toBe(message.slice(0, 300));
     expect(error.message.length).toBeLessThan(350);
-    expect(error.message).toMatch(
-      /^INSPIRE rejected the request: \\\[x\\\]\(https:\/\/e\) &lt;b&gt;bold&lt;\/b&gt; y+$/,
-    );
+    expect(error.message).toBe(`INSPIRE rejected the request: ${message.slice(0, 300)}`);
   });
 
-  it('flattens a JSON 400 message to one line, and drops tag and other format characters', async () => {
+  it('flattens a JSON 400 message and drops tags and format characters without escaping markup', async () => {
     const tags = [...'hidden'].map((c) => String.fromCodePoint(0xe0000 + c.charCodeAt(0))).join('');
     const ZWSP = String.fromCharCode(0x200b);
     h.route(

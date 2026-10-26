@@ -39,7 +39,7 @@ const QUERY_FIELDS = new Set(
 );
 
 /**
- * Finds an empty standalone recognized `field:` clause, ignoring quoted and regex values
+ * Finds an empty standalone recognized `field:` clause, including empty quoted values, ignoring nonempty quoted and regex values
  * and embedded selectors. This is a linear scan, not a complete query parser:
  * value negation, groups, unknown fields and nested colon values pass through.
  */
@@ -66,15 +66,27 @@ export function hasEmptyQueryField(query: string): boolean {
     }
   }
   if (start < query.length) tokens.push(query.slice(start).toLowerCase());
+  const emptyQuoted = (value: string) =>
+    (value[0] === '"' || value[0] === "'") &&
+    value.length >= 2 &&
+    value.at(-1) === value[0] &&
+    value.slice(1, -1).trim() === '';
   for (const [i, token] of tokens.entries()) {
-    if (!token.endsWith(':') || !QUERY_FIELDS.has(token.slice(0, -1))) continue;
+    const colon = token.indexOf(':');
+    if (colon < 0 || !QUERY_FIELDS.has(token.slice(0, colon))) continue;
+    const value = token.slice(colon + 1);
+    if (value !== '') {
+      if (emptyQuoted(value)) return true;
+      continue;
+    }
     let next = i + 1;
     while (tokens[next] === '(' || tokens[next] === 'not') next++;
     if (
       next === tokens.length ||
       tokens[next] === ')' ||
       tokens[next] === 'and' ||
-      tokens[next] === 'or'
+      tokens[next] === 'or' ||
+      emptyQuoted(tokens[next] ?? '')
     )
       return true;
   }

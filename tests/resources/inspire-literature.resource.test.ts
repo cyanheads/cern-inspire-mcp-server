@@ -140,6 +140,35 @@ describe('params', () => {
 });
 
 describe('handler', () => {
+  it('shares contributor roles and public document metadata at the first 25 entries', async () => {
+    routeRecord(
+      dossierMetadata(30, {
+        authors: Array.from({ length: 30 }, (_, index) => ({
+          full_name: `Editor ${index}`,
+          inspire_roles: ['editor', 'supervisor'],
+        })),
+        documents: [
+          { url: 'https://example.org/full.pdf', filename: 'fulltext.pdf', fulltext: true },
+          { url: 'https://example.org/hidden', hidden: true },
+        ],
+      }),
+    );
+    routeData();
+    const paper = await read(HIGGS.recid);
+    expect(paper).toEqual(expect.schemaMatching(inspireLiteratureResource.output));
+    expect(paper.authors).toHaveLength(25);
+    expect(paper.authors[24]).toEqual({
+      name: 'Editor 24',
+      affiliations: [],
+      roles: ['editor', 'supervisor'],
+    });
+    expect(paper.authorOffset).toBe(0);
+    expect(paper.nextAuthorOffset).toBe(25);
+    expect(paper.documents).toEqual([
+      { url: 'https://example.org/full.pdf', filename: 'fulltext.pdf', fulltext: true },
+    ]);
+    expect(h.requests).toHaveLength(2);
+  });
   it('reads the record and its HEPData availability in two requests, with no resolve step', async () => {
     routeRecord(dossierMetadata(3));
     routeData();
@@ -189,7 +218,7 @@ describe('handler', () => {
       truncated: true,
       shown: 25,
       cap: 25,
-      notice: `Showing positions 1–25 of 40 available authors; call cern_inspire_get_paper with paper "${HIGGS.recid}", author_offset 25 and max_authors 25 to continue. You may also raise max_authors (up to 500).`,
+      notice: `Showing positions 1–25 of 40 available contributors; call cern_inspire_get_paper with paper "${HIGGS.recid}", author_offset 25 and max_authors 25 to continue. You may also raise max_authors (up to 500).`,
     });
     expect(paper).toEqual(tool);
   });

@@ -388,13 +388,17 @@ describe('author_not_identifier', () => {
     expect(h.requests).toHaveLength(0);
   });
 
-  it('echoes the author through callerEcho() in the message and keeps it verbatim in data', async () => {
+  it('keeps the raw author in the structured error and escapes it once in content', async () => {
     const author = 'Doe\r\n# injected\n[x](http://evil) <b>';
 
-    const error = errorEnvelope(await run({ author }));
-
+    const result = await run({ author });
+    const error = errorEnvelope(result);
+    expect(error.message).toBe(
+      'author "Doe # injected [x](http://evil) <b>" is not a BAI, ORCID, INSPIRE ID, or author recid.',
+    );
     expect(error.message).not.toMatch(/[\r\n]/);
-    expect(error.message).toContain('Doe # injected \\[x\\](http://evil) &lt;b>');
+    expect(fullText(result)).toContain('\\[x\\](http://evil) \\<b>');
+    expect(fullText(result)).not.toContain('\\\\\\[x');
     expect(error.data?.author).toBe(author);
   });
 
@@ -404,7 +408,7 @@ describe('author_not_identifier', () => {
     expect(errorEnvelope(result).message).toBe(
       'author "Ellis*" is not a BAI, ORCID, INSPIRE ID, or author recid.',
     );
-    expect(fullText(result)).toContain('author "Ellis*" is not a BAI');
+    expect(fullText(result)).toContain('author "Ellis\\*" is not a BAI');
   });
 
   it('still escapes a link-shaped name in the content[] message', async () => {
@@ -653,7 +657,7 @@ describe('required enrichment', () => {
     expect(out.all).toEqual({ papers: 0, citations: 0 });
     expect(out.published).toEqual({ papers: 0, citations: 0 });
     expect(out.notice).toBeTypeOf('string');
-    expect(fullText(result)).toContain('**Applied filters:** none');
+    expect(fullText(result)).toContain('**Applied filters:** `none`');
   });
 
   it('echoes the filters and the resolved query on a zero-result author summary', async () => {
@@ -682,7 +686,7 @@ describe('required enrichment', () => {
       citeablePapers: 413,
     });
     expect(out.notice).toBeUndefined();
-    expect(fullText(result)).toContain('**Applied filters:** document_types=published');
+    expect(fullText(result)).toContain('**Applied filters:** `document_types=published`');
   });
 });
 

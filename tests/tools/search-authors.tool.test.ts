@@ -89,6 +89,60 @@ const errors = searchAuthorsTool.errors ?? [];
 const hint = (reason: string) => errors.find((e) => e.reason === reason)?.recovery;
 
 describe('input', () => {
+  it('advertises budgets above the result ceiling', () => {
+    const schema = searchAuthorsTool.input.toJSONSchema({ io: 'input' });
+    const budget = schema.properties?.limit;
+    expect(budget).toMatchObject({ type: 'integer', minimum: 1 });
+    expect(budget).not.toHaveProperty('maximum', 25);
+    expect(searchAuthorsTool.input.safeParse({ query: 'x', limit: 1000000 }).success).toBe(true);
+  });
+
+  it.each([
+    [1, 1, false],
+    [25, 25, false],
+    [25, 26, true],
+  ] as const)(
+    'keeps the reduction notice with %i shown and %i matched',
+    async (shown, total, truncated) => {
+      routePage(pageOf(shown, { total }));
+      const result = await run({ query: 'Doe', limit: 26 });
+      const out = structured<Output>(result);
+      expect(out).toMatchObject({ cap: 25, shown, totalCount: total, truncated });
+      expect(out.notice).toContain('limit 26 reduced to 25.');
+      expect(fullText(result)).toContain('limit 26 reduced to 25.');
+      expect(fullText(result)).toContain(`**shown:** ${shown}`);
+      expect(params()?.get('size')).toBe('25');
+      if (truncated) {
+        expect(out.notice).toContain('add name parts');
+      }
+      expect(out.notice).not.toContain('raise limit');
+    },
+  );
+
+  it.each([25, 26, 1000000])(
+    'accepts budget %i and discloses reductions on an empty result',
+    async (requested) => {
+      routePage(emptyBody());
+      const result = await run({ query: 'Nobody', limit: requested });
+      const out = structured<Output>(result);
+      expect(out).toMatchObject({ cap: 25, shown: 0, truncated: false });
+      expect(params()?.get('size')).toBe('25');
+      if (requested > 25) {
+        expect(out.notice).toContain(`limit ${requested} reduced to 25`);
+        expect(fullText(result)).toContain(`limit ${requested} reduced to 25`);
+      }
+      expect(out.notice).toContain('Nobody');
+    },
+  );
+
+  it('preserves a seven-result budget on an empty response', async () => {
+    routePage(emptyBody());
+    const result = await run({ query: 'Nobody', limit: 7 });
+    expect(structured<Output>(result)).toMatchObject({ cap: 7, shown: 0, truncated: false });
+    expect(params()?.get('size')).toBe('7');
+    expect(fullText(result)).toContain('Nobody');
+  });
+
   it('applies the default limit and sends only q, fields, and size', async () => {
     routePage();
 
@@ -146,7 +200,6 @@ describe('input', () => {
     ['an object query', { query: { name: 'Doe' } }],
     ['a fractional number query', { query: 1000001.5 }],
     ['limit 0', { query: 'Doe', limit: 0 }],
-    ['limit 26', { query: 'Doe', limit: 26 }],
     ['a negative limit', { query: 'Doe', limit: -1 }],
     ['a fractional limit', { query: 'Doe', limit: 2.5 }],
     ['a limit given as text', { query: 'Doe', limit: '5' }],
@@ -245,7 +298,7 @@ describe('identifier forms', () => {
 
     const result = await run({ query: 'Jane.Doe.1' });
 
-    expect(fullText(result)).toContain('**Matched as:** bai');
+    expect(fullText(result)).toContain('**Matched as:** `bai`');
   });
 });
 
@@ -294,7 +347,7 @@ describe('required enrichment', () => {
     });
     expect(out.notice).toBeTypeOf('string');
     expect(fullText(result)).toContain('**0 total**');
-    expect(fullText(result)).toContain('**Matched as:** name');
+    expect(fullText(result)).toContain('**Matched as:** `name`');
     expect(bodyText(result)).toBe('## INSPIRE author profiles (0)');
   });
 
