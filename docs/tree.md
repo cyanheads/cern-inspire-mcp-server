@@ -1,6 +1,6 @@
 # cern-inspire-mcp-server - Directory Structure
 
-Generated on: 2026-10-26 17:55:04
+Generated on: 2026-10-26 18:02:26
 
 ```text
 cern-inspire-mcp-server/
@@ -25,6 +25,7 @@ cern-inspire-mcp-server/
 │   └── settings.json
 ├── changelog/
 │   ├── 0.1.x/
+│   ├── 0.2.x/
 │   └── template.md
 ├── docs/
 │   └── design.md
