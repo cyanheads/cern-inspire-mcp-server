@@ -18,6 +18,7 @@ import { inspireLiteratureResource } from '@/mcp-server/resources/definitions/in
 import { getPaperTool } from '@/mcp-server/tools/definitions/get-paper.tool.js';
 import { MARKUP_AS_TEXT, PUBLISHER_MARKUP } from '../fixtures/inspire-markup.js';
 import {
+  CONFERENCE_PAPERS,
   dataPage,
   dossierMetadata,
   emptyBody,
@@ -28,6 +29,8 @@ import {
   mergedRecidResponse,
   notFoundBody,
   rateLimitResponse,
+  supervisorEntry,
+  THESES,
   TWO_RECORD_PAPERS,
 } from '../fixtures/inspire-upstream.js';
 import {
@@ -228,6 +231,54 @@ describe('handler', () => {
     routeData(emptyBody());
 
     expect((await read(HIGGS.recid)).hepdata).toEqual({ status: 'none' });
+  });
+
+  it('returns the supervisors, thesis details, and conference links cern_inspire_get_paper returns', async () => {
+    const thesis = {
+      ...THESES.master,
+      supervisors: Array.from({ length: 30 }, (_, i) => supervisorEntry(i + 1)),
+      publication_info: CONFERENCE_PAPERS.proceedings.publication_info,
+    };
+    const recid = String(thesis.control_number);
+    routeRecord(thesis);
+    routeData(emptyBody());
+    const paper = await read(recid);
+    h = startHarness();
+    routeRecord(thesis);
+    routeData(emptyBody());
+
+    const result = await runToolContract(getPaperTool, { paper: recid });
+
+    expect(paper).toEqual(expect.schemaMatching(inspireLiteratureResource.output));
+    expect(paper.supervisors).toHaveLength(30);
+    expect(paper.thesis).toEqual({
+      degreeType: 'Master',
+      institutions: [{ name: 'Minas Gerais U.', recid: '908193' }],
+      defenseDate: '2024-10-25',
+      date: '2024-12-13',
+    });
+    expect(paper.publications).toEqual([
+      { journal: 'Phys.Rev.D', volume: '34', year: 1986, pages: '1642', articleId: '1642' },
+      { cnum: 'C86-07-16', conferenceRecid: '965760', parentRecid: '256605' },
+      { pages: '235-238', parentRecid: '568498' },
+    ]);
+    const { truncated, shown, cap, notice, ...tool } = result.structuredContent as Record<
+      string,
+      unknown
+    >;
+    expect({ truncated, shown, cap, notice }).toEqual({
+      truncated: false,
+      shown: 1,
+      cap: 25,
+      notice: undefined,
+    });
+    expect(paper).toEqual(tool);
+  });
+
+  it('names the supervisors, thesis details, and conference links in its description', () => {
+    expect(inspireLiteratureResource.description).toMatch(/every thesis supervisor/);
+    expect(inspireLiteratureResource.description).toMatch(/thesis details/);
+    expect(inspireLiteratureResource.description).toMatch(/conference and proceedings links/);
   });
 
   it('carries a two-record paper’s other record in hepdata.otherRecords, each linked by record number', async () => {

@@ -3,7 +3,8 @@
  * `runToolContract` over an `InspireService` on a fake fetch: input validation
  * and blank-as-unset handling, the recid-versus-free-text query routing, the
  * required enrichment on a zero-result page, an under-cap page, and capped
- * pages, the lifecycle fields (the ongoing sentinel, completion dates), `format()`
+ * pages, paging (the 10,000-result window, continuation from `links.next`, the
+ * past-the-end notice), the lifecycle fields (the ongoing sentinel, completion dates), `format()`
  * parity with `structuredContent`, upstream text kept out of inline markdown
  * slots, and the shared upstream failure classes on the wire. No live network.
  * @module tests/tools/search-experiments.tool.test
@@ -40,6 +41,7 @@ vi.mock('@/services/inspire/inspire-service.js', async (importOriginal) =>
 type Input = z.input<typeof searchExperimentsTool.input>;
 type Output = z.infer<typeof searchExperimentsTool.output> & {
   cap: number;
+  nextPage?: number;
   notice?: string;
   shown: number;
   totalCount: number;
@@ -70,7 +72,7 @@ const experiment = (n: number, overrides: Parameters<typeof experimentMetadata>[
     ...overrides,
   });
 
-const pageOf = (count: number, options: { total?: number } = {}) =>
+const pageOf = (count: number, options: { next?: boolean; total?: number } = {}) =>
   experimentPage(
     Array.from({ length: count }, (_, i) => experiment(i + 1)),
     options,
@@ -106,16 +108,19 @@ describe('input', () => {
   ] as const)(
     'keeps the reduction notice with %i shown and %i matched',
     async (shown, total, truncated) => {
-      routePage(pageOf(shown, { total }));
+      routePage(pageOf(shown, { total, next: truncated }));
       const result = await run({ query: 'ATLAS', limit: 26 });
       const out = structured<Output>(result);
-      expect(out).toMatchObject({ cap: 25, shown, totalCount: total, truncated });
+      expect(out).toMatchObject({ cap: 25, limit: 25, shown, totalCount: total, truncated });
       expect(out.notice).toContain('limit 26 reduced to 25.');
       expect(fullText(result)).toContain('limit 26 reduced to 25.');
       expect(fullText(result)).toContain(`**shown:** ${shown}`);
+      expect(bodyText(result)).toContain('**Limit:** 25');
       expect(params()?.get('size')).toBe('25');
       if (truncated) {
-        expect(out.notice).toContain('use a more specific name');
+        expect(out.notice).toBe(
+          'More results: request page 2 with limit 25. limit 26 reduced to 25.',
+        );
       }
       expect(out.notice).not.toContain('raise limit');
     },
@@ -145,17 +150,18 @@ describe('input', () => {
     expect(fullText(result)).toContain('Nobody');
   });
 
-  it('applies the default limit and sends only q, fields, and size', async () => {
+  it('applies the default limit and page and sends only q, fields, size, and page', async () => {
     routePage();
 
     const result = await run({ query: 'ATLAS' });
 
     expect(result.isError).toBeFalsy();
     expect(h.requests[0]?.path).toBe('/api/experiments');
-    expect([...(h.requests[0]?.names ?? [])].sort()).toEqual(['fields', 'q', 'size']);
+    expect([...(h.requests[0]?.names ?? [])].sort()).toEqual(['fields', 'page', 'q', 'size']);
     expect(params()?.get('q')).toBe('ATLAS');
     expect(params()?.get('size')).toBe('5');
-    expect(structured<Output>(result).cap).toBe(5);
+    expect(params()?.get('page')).toBe('1');
+    expect(structured<Output>(result)).toMatchObject({ cap: 5, limit: 5, page: 1 });
   });
 
   it('reads a blank limit as unset', async () => {
@@ -195,6 +201,10 @@ describe('input', () => {
     ['a negative limit', { query: 'ATLAS', limit: -1 }],
     ['a fractional limit', { query: 'ATLAS', limit: 2.5 }],
     ['a limit given as text', { query: 'ATLAS', limit: '5' }],
+    ['page 0', { query: 'LHC', page: 0 }],
+    ['a negative page', { query: 'LHC', page: -1 }],
+    ['a fractional page', { query: 'LHC', page: 1.5 }],
+    ['a page given as text', { query: 'LHC', page: '2' }],
   ])('rejects %s as InvalidParams without calling INSPIRE', async (_label, input) => {
     const result = await runRaw(input);
 
@@ -252,19 +262,38 @@ describe('query routing', () => {
 });
 
 describe('declared error contracts', () => {
-  it('declares exactly the four shared reasons, with tool-specific recovery text', () => {
+  it('declares the window reason and the four shared reasons, with tool-specific recovery text', () => {
     expect(errors.map((e) => e.reason)).toEqual([
+      'beyond_result_window',
       'invalid_query',
       'inspire_rate_limited',
       'pacer_shed',
       'upstream_unreadable',
     ]);
-    expect(errors.find((e) => e.reason === 'invalid_query')).toMatchObject({
-      code: JsonRpcErrorCode.ValidationError,
-      severity: 'notice',
-    });
-    expect(hint('invalid_query')).toContain('cern_inspire_search_experiments');
+    for (const reason of ['beyond_result_window', 'invalid_query']) {
+      expect(errors.find((e) => e.reason === reason)).toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+        severity: 'notice',
+      });
+      expect(hint(reason)).toContain('cern_inspire_search_experiments');
+    }
     expect(hint('upstream_unreadable')).toContain('cern_inspire_search_experiments');
+  });
+
+  it('routes an unreadable body to a later retry of the same page and limit, never a smaller limit that shifts the page', () => {
+    expect(hint('upstream_unreadable')).toBe(
+      'Retry this call in a few seconds; if it fails again, INSPIRE is likely serving an error page, so wait a minute before retrying cern_inspire_search_experiments with the same page and limit.',
+    );
+  });
+
+  it('routes a page past the window to a narrower query, never a retry of the same page', () => {
+    expect(hint('beyond_result_window')).toBe(
+      'Narrow the query with a more specific name, legacy name, or accelerator until it matches under 10,000 records, then page again with cern_inspire_search_experiments.',
+    );
+  });
+
+  it('spells the recovery placeholders in capitals, which survive a markdown-to-HTML render', () => {
+    for (const { reason } of errors) expect(hint(reason)).not.toMatch(/<[A-Za-z]/);
   });
 });
 
@@ -278,6 +307,15 @@ describe('next-step descriptions', () => {
     expect(description).toContain('cern_inspire_search_literature');
     expect(description).toContain('cern_inspire_get_citation_summary');
   });
+
+  it('describes numberOfPapers as a stored count that can differ from the literatureQuery match, either way', () => {
+    const description =
+      searchExperimentsTool.output.shape.experiments.element.shape.numberOfPapers.description ?? '';
+
+    expect(description).toBe(
+      "INSPIRE's stored paper count; it can differ from the number of records literatureQuery matches.",
+    );
+  });
 });
 
 describe('required enrichment', () => {
@@ -289,14 +327,23 @@ describe('required enrichment', () => {
     const out = structured<Output>(result);
     expect(out).toMatchObject({
       experiments: [],
+      page: 1,
+      limit: 5,
+      hasMore: false,
       totalCount: 0,
       truncated: false,
       shown: 0,
       cap: 5,
     });
+    expect(out.nextPage).toBeUndefined();
     expect(out.notice).toBeTypeOf('string');
     expect(fullText(result)).toContain('**0 total**');
-    expect(bodyText(result)).toBe('## INSPIRE experiments (0)');
+    expect(bodyText(result)).toBe(
+      [
+        '## INSPIRE experiments, page 1',
+        '**Page:** 1 · **Limit:** 5 · **Experiments on this page:** 0 · **More pages:** no',
+      ].join('\n'),
+    );
   });
 
   it('writes every required field on an under-cap page and sets no notice', async () => {
@@ -320,29 +367,19 @@ describe('required enrichment', () => {
     expect(out.notice).toBeUndefined();
   });
 
-  it('marks a page truncated when more records matched than were returned', async () => {
-    routePage(pageOf(5, { total: 40 }));
+  it.each([5, 25])(
+    'offers the next page rather than a larger limit when limit %i leaves more records',
+    async (limit) => {
+      routePage(pageOf(limit, { next: true, total: 333 }));
 
-    const result = await run({ query: 'LHC' });
+      const result = await run({ query: 'neutrino', limit });
 
-    const out = structured<Output>(result);
-    expect(out).toMatchObject({ truncated: true, shown: 5, cap: 5, totalCount: 40 });
-    expect(out.notice).toBe(
-      'More experiments matched; raise limit (max 25) or use a more specific name or legacy name.',
-    );
-    expect(fullText(result)).toContain(out.notice as string);
-  });
-
-  it('uses the at-maximum wording when the limit is already 25', async () => {
-    routePage(pageOf(25, { total: 400 }));
-
-    const out = structured<Output>(await run({ query: 'LHC', limit: 25 }));
-
-    expect(out).toMatchObject({ truncated: true, shown: 25, cap: 25, totalCount: 400 });
-    expect(out.notice).toBe(
-      'More experiments matched than the 25 returned; use a more specific name or legacy name.',
-    );
-  });
+      const out = structured<Output>(result);
+      expect(out).toMatchObject({ truncated: true, shown: limit, cap: limit, totalCount: 333 });
+      expect(out.notice).toBe(`More results: request page 2 with limit ${limit}.`);
+      expect(fullText(result)).toContain(out.notice as string);
+    },
+  );
 
   it('reports the match total, not the page length, as totalCount', async () => {
     routePage(pageOf(2, { total: 2 }));
@@ -350,6 +387,251 @@ describe('required enrichment', () => {
     const out = structured<Output>(await run({ query: 'LHC' }));
 
     expect(out).toMatchObject({ totalCount: 2, shown: 2, truncated: false });
+  });
+});
+
+describe('paging', () => {
+  /** Records numbered from `first`, so a later page carries its own recids and names. */
+  const rows = (first: number, count: number) =>
+    Array.from({ length: count }, (_, i) => experiment(first + i));
+
+  const pageParam = (n = 0) => h.requests[n]?.params.get('page');
+
+  it("returns the first page's rows when no page is given", async () => {
+    routePage(pageOf(3, { total: 3 }));
+
+    const out = structured<Output>(await run({ query: 'LHC' }));
+
+    expect(out.experiments.map((e) => e.recid)).toEqual(['1100001', '1100002', '1100003']);
+    expect(out).toMatchObject({ shown: 3, cap: 5, totalCount: 3, truncated: false });
+    expect(params()?.get('size')).toBe('5');
+  });
+
+  it('sends page 1 for an omitted or blank page, returns the same rows, and echoes it on both surfaces', async () => {
+    routePage(pageOf(3, { total: 3 }));
+
+    const omitted = await run({ query: 'LHC' });
+    const blank = await run({ query: 'LHC', page: '' } as Input);
+
+    expect([pageParam(0), pageParam(1)]).toEqual(['1', '1']);
+    expect(structured<Output>(blank).experiments).toEqual(structured<Output>(omitted).experiments);
+    for (const result of [omitted, blank]) {
+      expect(structured<Output>(result)).toMatchObject({ page: 1, limit: 5, hasMore: false });
+      expect(bodyText(result)).toContain('## INSPIRE experiments, page 1');
+    }
+  });
+
+  it('sends the requested page with the limit as its size, for a recid lookup too', async () => {
+    routePage(pageOf(1));
+
+    await run({ query: 'neutrino', page: 3, limit: 7 });
+    await run({ query: '1108541', page: 2 });
+
+    expect([pageParam(0), h.requests[0]?.params.get('size')]).toEqual(['3', '7']);
+    expect([pageParam(1), h.requests[1]?.params.get('q')]).toEqual(['2', 'control_number:1108541']);
+  });
+
+  it("leaves INSPIRE's last page untruncated: hasMore follows links.next, not the match total", async () => {
+    routePage(experimentPage(rows(326, 8), { total: 333 }));
+
+    const result = await run({ query: 'neutrino', page: 14, limit: 25 });
+
+    const out = structured<Output>(result);
+    expect(out).toMatchObject({
+      page: 14,
+      limit: 25,
+      hasMore: false,
+      truncated: false,
+      shown: 8,
+      totalCount: 333,
+    });
+    expect(out.nextPage).toBeUndefined();
+    expect(out.notice).toBeUndefined();
+    expect(fullText(result)).not.toContain('Next page');
+  });
+
+  it('marks a page with a next link truncated and points at the next page', async () => {
+    routePage(pageOf(5, { next: true, total: 333 }));
+
+    const result = await run({ query: 'neutrino' });
+
+    const out = structured<Output>(result);
+    expect(out).toMatchObject({
+      page: 1,
+      limit: 5,
+      hasMore: true,
+      truncated: true,
+      shown: 5,
+      cap: 5,
+      totalCount: 333,
+      nextPage: 2,
+      notice: 'More results: request page 2 with limit 5.',
+    });
+    expect(fullText(result)).toContain('**Next page:** 2');
+    expect(fullText(result)).toContain('More results: request page 2 with limit 5.');
+    expect(bodyText(result)).toContain('**More pages:** yes');
+  });
+
+  it('counts the next page from the requested page', async () => {
+    routePage(experimentPage(rows(301, 25), { next: true, total: 333 }));
+
+    const out = structured<Output>(await run({ query: 'neutrino', page: 13, limit: 25 }));
+
+    expect(out.nextPage).toBe(14);
+    expect(out.notice).toBe('More results: request page 14 with limit 25.');
+    expect(pageParam()).toBe('13');
+  });
+
+  it('names the limit in the next-page notice, so sending exactly what it says keeps limit 25 rather than the default 5', async () => {
+    routePage(pageOf(25, { next: true, total: 333 }));
+
+    const result = await run({ query: 'neutrino', limit: 25 });
+    const recipe = /request page (\d+) with limit (\d+)\./.exec(
+      structured<Output>(result).notice ?? '',
+    );
+    await run({ query: 'neutrino', page: Number(recipe?.[1]), limit: Number(recipe?.[2]) });
+
+    expect(recipe?.slice(1)).toEqual(['2', '25']);
+    expect(fullText(result)).toContain(recipe?.[0]);
+    expect(h.requests.map((r) => [r.params.get('page'), r.params.get('size')])).toEqual([
+      ['1', '25'],
+      ['2', '25'],
+    ]);
+    expect(searchExperimentsTool.enrichment?.nextPage?.description).toContain('same limit');
+  });
+
+  it('reports a page past the end alone: the query did match', async () => {
+    routePage(experimentPage([], { total: 333 }));
+
+    const result = await run({ query: 'neutrino', page: 15, limit: 25 });
+
+    const out = structured<Output>(result);
+    expect(out).toMatchObject({
+      experiments: [],
+      shown: 0,
+      totalCount: 333,
+      truncated: false,
+      hasMore: false,
+    });
+    expect(out.nextPage).toBeUndefined();
+    expect(out.notice).toBe('Page 15 is past the last page (14); request a lower page.');
+    expect(fullText(result)).toContain(out.notice as string);
+    expect(fullText(result)).not.toContain('No INSPIRE experiment matched');
+  });
+
+  it('numbers the last page from the effective limit when a reduced limit runs past the end', async () => {
+    routePage(experimentPage([], { total: 51 }));
+
+    const out = structured<Output>(await run({ query: 'LHC', page: 4, limit: 26 }));
+
+    expect(out.notice).toBe(
+      'limit 26 reduced to 25. Page 4 is past the last page (3); request a lower page.',
+    );
+  });
+
+  it('gives the zero-hit notice, not the past-the-end one, when nothing matched on a later page', async () => {
+    routePage(emptyBody());
+
+    const out = structured<Output>(await run({ query: 'Zzzz', page: 3 }));
+
+    expect(out.notice?.startsWith('No INSPIRE experiment matched "Zzzz". ')).toBe(true);
+    expect(out.notice).not.toContain('past the last page');
+  });
+
+  it('fails page × limit over 10,000 as beyond_result_window, before any request', async () => {
+    const result = await run({ query: 'neutrino', page: 401, limit: 25 });
+
+    const error = errorEnvelope(result);
+    expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(error.data?.reason).toBe('beyond_result_window');
+    expect(error.data).toMatchObject({ page: 401, limit: 25 });
+    expect(error.message).toContain('page 401 × limit 25');
+    expect(error.data?.recovery?.hint).toBe(hint('beyond_result_window'));
+    expect(fullText(result)).toContain('reason beyond_result_window');
+    expect(fullText(result)).toContain(`Recovery: ${hint('beyond_result_window')}`);
+    expect(h.requests).toHaveLength(0);
+  });
+
+  it.each([
+    [400, 25, false],
+    [401, 25, true],
+    [2000, 5, false],
+    [2001, 5, true],
+    [10_000, 1, false],
+    [10_001, 1, true],
+  ])('page %i × limit %i: past the window is %s', async (page, limit, rejected) => {
+    routePage(emptyBody());
+
+    const result = await run({ query: 'LHC', page, limit });
+
+    expect(result.isError === true).toBe(rejected);
+    expect(h.requests).toHaveLength(rejected ? 0 : 1);
+  });
+
+  it('checks the window against the effective limit, not the requested one', async () => {
+    routePage(pageOf(1, { total: 20_000 }));
+
+    const allowed = await run({ query: 'LHC', page: 400, limit: 26 });
+    const refused = await run({ query: 'LHC', page: 401, limit: 1_000_000 });
+
+    expect(allowed.isError).toBeFalsy();
+    expect(structured<Output>(allowed).notice).toContain('limit 26 reduced to 25.');
+    expect(h.requests[0]?.params.get('size')).toBe('25');
+    expect(errorEnvelope(refused).data).toMatchObject({
+      reason: 'beyond_result_window',
+      page: 401,
+      limit: 25,
+    });
+    expect(h.requests).toHaveLength(1);
+  });
+
+  it('withholds a next page that would cross the window, under a reduced limit too, and says to narrow', async () => {
+    routePage(experimentPage(rows(9976, 25), { next: true, total: 20_000 }));
+
+    const result = await run({ query: 'LHC', page: 400, limit: 1_000_000 });
+
+    const out = structured<Output>(result);
+    expect(out).toMatchObject({ truncated: true, hasMore: true, shown: 25, cap: 25, limit: 25 });
+    expect(out.nextPage).toBeUndefined();
+    expect(out.notice).toBe(
+      'INSPIRE serves only the first 10,000 results of a query; narrow it with a more specific name, legacy name, or accelerator to reach the rest. limit 1000000 reduced to 25.',
+    );
+    expect(fullText(result)).not.toContain('Next page');
+  });
+
+  it('offers the last reachable next page at the 10,000-result window edge', async () => {
+    routePage(experimentPage(rows(9951, 25), { next: true, total: 20_000 }));
+
+    const out = structured<Output>(await run({ query: 'LHC', page: 399, limit: 25 }));
+
+    expect(out.nextPage).toBe(400);
+    expect(out.notice).toBe('More results: request page 400 with limit 25.');
+  });
+
+  it('names the page and numbers rows from (page − 1) × limit + 1 in content[]', async () => {
+    routePage(experimentPage(rows(11, 2), { next: true, total: 40 }));
+
+    const result = await run({ query: 'LHC', page: 3, limit: 5 });
+
+    const text = bodyText(result);
+    expect(text).toContain('## INSPIRE experiments, page 3');
+    expect(text).toContain(
+      '**Page:** 3 · **Limit:** 5 · **Experiments on this page:** 2 · **More pages:** yes',
+    );
+    expect(lines(result).filter((line) => line.startsWith('### '))).toEqual([
+      '### 11. CERN-LHC-EXP11 — EXP11',
+      '### 12. CERN-LHC-EXP12 — EXP12',
+    ]);
+    expect(structured<Output>(result)).toMatchObject({ page: 3, limit: 5, hasMore: true });
+  });
+
+  it('numbers rows from the effective limit when the requested one was reduced', async () => {
+    routePage(experimentPage(rows(26, 1), { total: 26 }));
+
+    const result = await run({ query: 'LHC', page: 2, limit: 26 });
+
+    expect(bodyText(result)).toContain('**Page:** 2 · **Limit:** 25');
+    expect(bodyText(result)).toContain('### 26. CERN-LHC-EXP26 — EXP26');
   });
 });
 
@@ -377,12 +659,16 @@ describe('zero-hit notice', () => {
     expect(fullText(result)).not.toMatch(/<[A-Za-z]/);
   });
 
-  it('names a recid lookup by its digits', async () => {
+  it('names a recid that matches no experiment record, without name advice, on both surfaces', async () => {
     routePage(emptyBody());
 
-    const out = structured<Output>(await run({ query: '999999999' }));
+    const result = await run({ query: '999999999' });
 
-    expect(out.notice?.startsWith('No INSPIRE experiment matched "999999999". ')).toBe(true);
+    const notice =
+      'No INSPIRE experiment record has recid 999999999; search by experiment, collaboration, or accelerator name instead.';
+    expect(structured<Output>(result).notice).toBe(notice);
+    expect(fullText(result)).toContain(notice);
+    expect(fullText(result)).not.toContain('common name');
   });
 
   it('echoes the query through callerEcho(): newlines flatten and brackets are escaped', async () => {
@@ -549,7 +835,10 @@ describe('records and format() parity', () => {
 
     const text = bodyText(await run({ query: 'ATLAS' }));
 
-    expect(text).toContain('## INSPIRE experiments (1)');
+    expect(text).toContain('## INSPIRE experiments, page 1');
+    expect(text).toContain(
+      '**Page:** 1 · **Limit:** 5 · **Experiments on this page:** 1 · **More pages:** no',
+    );
     expect(text).toContain('### 1. CERN-LHC-ATLAS — ATLAS');
     expect(text).toContain(
       '**recid:** 1108541 · **Short name:** ATLAS · **Accelerator:** LHC · **Papers (INSPIRE count):** 18497 · **Core:** yes',
@@ -617,7 +906,8 @@ describe('records and format() parity', () => {
     });
     expect(bodyText(result)).toBe(
       [
-        '## INSPIRE experiments (1)',
+        '## INSPIRE experiments, page 1',
+        '**Page:** 1 · **Limit:** 5 · **Experiments on this page:** 1 · **More pages:** no',
         '',
         '### 1. FNAL-E-0001',
         '**recid:** 5',
@@ -684,7 +974,7 @@ describe('upstream text stays out of inline markdown slots', () => {
     expect(shape(hostile)).toEqual(shape(benign));
     expect(lines(hostile).some((line) => line.startsWith('# Injected'))).toBe(false);
     expect(lines(hostile).filter((line) => line.startsWith('#'))).toEqual([
-      '## INSPIRE experiments (1)',
+      '## INSPIRE experiments, page 1',
       '### 1. CERN-LHC-ATLAS # Injected heading \\*\\*Core:\\*\\* forged — ATLAS # Injected heading \\*\\*Core:\\*\\* forged',
     ]);
   });
@@ -770,7 +1060,7 @@ describe('upstream text stays out of inline markdown slots', () => {
 
     const body = lines(result);
     expect(body.filter((line) => line.startsWith('#'))).toEqual([
-      '## INSPIRE experiments (1)',
+      '## INSPIRE experiments, page 1',
       '### 1. CERN-LHC-ATLAS — ATLAS',
     ]);
     expect(body).toContain('- \\# — Home');

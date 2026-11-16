@@ -671,7 +671,9 @@ describe('caller cancellation', () => {
   it('keeps authors lookups on the same ladder: a 503 then success', async () => {
     script('/authors', new Response('down', { status: 503 }), jsonResponse(authorPage()));
 
-    const outcome = await settle(() => h.service.searchAuthors('Jane.Doe.1', 5, h.call()));
+    const outcome = await settle(() =>
+      h.service.searchAuthors({ query: 'Jane.Doe.1', page: 1, size: 5 }, h.call()),
+    );
 
     expect(outcome.ok && outcome.value.authors).toHaveLength(1);
   });

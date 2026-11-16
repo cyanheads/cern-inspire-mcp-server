@@ -3,7 +3,9 @@
  * over an `InspireService` on a fake fetch: input validation and blank-as-unset
  * handling, every identifier form the query accepts and the route it takes,
  * the required enrichment on a zero-result page, an under-cap page, and capped
- * pages, the per-route zero-hit hints, the deleted-profile notice, `format()`
+ * pages, paging (the 10,000-result window, continuation from `links.next`,
+ * past-the-end and deleted-only pages), the per-route zero-hit hints, the
+ * deleted-profile notice, `format()`
  * parity with `structuredContent`, upstream text kept out of inline markdown
  * slots, and the shared upstream failure classes on the wire. No live network.
  * @module tests/tools/search-authors.tool.test
@@ -41,6 +43,7 @@ type Input = z.input<typeof searchAuthorsTool.input>;
 type Output = z.infer<typeof searchAuthorsTool.output> & {
   cap: number;
   matchedAs: string;
+  nextPage?: number;
   notice?: string;
   shown: number;
   totalCount: number;
@@ -70,7 +73,7 @@ const author = (n: number, overrides: Parameters<typeof authorMetadata>[0] = {})
     ...overrides,
   });
 
-const pageOf = (count: number, options: { total?: number } = {}) =>
+const pageOf = (count: number, options: { next?: boolean; total?: number } = {}) =>
   authorPage(
     Array.from({ length: count }, (_, i) => author(i + 1)),
     options,
@@ -104,16 +107,19 @@ describe('input', () => {
   ] as const)(
     'keeps the reduction notice with %i shown and %i matched',
     async (shown, total, truncated) => {
-      routePage(pageOf(shown, { total }));
+      routePage(pageOf(shown, { total, next: truncated }));
       const result = await run({ query: 'Doe', limit: 26 });
       const out = structured<Output>(result);
-      expect(out).toMatchObject({ cap: 25, shown, totalCount: total, truncated });
+      expect(out).toMatchObject({ cap: 25, limit: 25, shown, totalCount: total, truncated });
       expect(out.notice).toContain('limit 26 reduced to 25.');
       expect(fullText(result)).toContain('limit 26 reduced to 25.');
       expect(fullText(result)).toContain(`**shown:** ${shown}`);
+      expect(bodyText(result)).toContain('**Limit:** 25');
       expect(params()?.get('size')).toBe('25');
       if (truncated) {
-        expect(out.notice).toContain('add name parts');
+        expect(out.notice).toContain('request page 2 with limit 25.');
+        expect(out.notice).toContain('search by BAI or ORCID');
+        expect(out.notice).not.toContain('add name parts');
       }
       expect(out.notice).not.toContain('raise limit');
     },
@@ -143,16 +149,17 @@ describe('input', () => {
     expect(fullText(result)).toContain('Nobody');
   });
 
-  it('applies the default limit and sends only q, fields, and size', async () => {
+  it('applies the default limit and page and sends only q, fields, size, and page', async () => {
     routePage();
 
     const result = await run({ query: 'Doe, Jane' });
 
     expect(result.isError).toBeFalsy();
-    expect([...(h.requests[0]?.names ?? [])].sort()).toEqual(['fields', 'q', 'size']);
+    expect([...(h.requests[0]?.names ?? [])].sort()).toEqual(['fields', 'page', 'q', 'size']);
     expect(h.requests[0]?.path).toBe('/api/authors');
     expect(params()?.get('size')).toBe('5');
-    expect(structured<Output>(result).cap).toBe(5);
+    expect(params()?.get('page')).toBe('1');
+    expect(structured<Output>(result)).toMatchObject({ cap: 5, limit: 5, page: 1 });
   });
 
   it('reads a blank limit as unset', async () => {
@@ -203,6 +210,10 @@ describe('input', () => {
     ['a negative limit', { query: 'Doe', limit: -1 }],
     ['a fractional limit', { query: 'Doe', limit: 2.5 }],
     ['a limit given as text', { query: 'Doe', limit: '5' }],
+    ['page 0', { query: 'Doe', page: 0 }],
+    ['a negative page', { query: 'Doe', page: -1 }],
+    ['a fractional page', { query: 'Doe', page: 1.5 }],
+    ['a page given as text', { query: 'Doe', page: '2' }],
   ])('rejects %s as InvalidParams without calling INSPIRE', async (_label, input) => {
     const result = await runRaw(input);
 
@@ -303,19 +314,38 @@ describe('identifier forms', () => {
 });
 
 describe('declared error contracts', () => {
-  it('declares exactly the four shared reasons, with tool-specific recovery text', () => {
+  it('declares the window reason and the four shared reasons, with tool-specific recovery text', () => {
     expect(errors.map((e) => e.reason)).toEqual([
+      'beyond_result_window',
       'invalid_query',
       'inspire_rate_limited',
       'pacer_shed',
       'upstream_unreadable',
     ]);
-    expect(errors.find((e) => e.reason === 'invalid_query')).toMatchObject({
-      code: JsonRpcErrorCode.ValidationError,
-      severity: 'notice',
-    });
-    expect(hint('invalid_query')).toContain('cern_inspire_search_authors');
+    for (const reason of ['beyond_result_window', 'invalid_query']) {
+      expect(errors.find((e) => e.reason === reason)).toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+        severity: 'notice',
+      });
+      expect(hint(reason)).toContain('cern_inspire_search_authors');
+    }
     expect(hint('upstream_unreadable')).toContain('cern_inspire_search_authors');
+  });
+
+  it('routes a page past the window to an identifier, never to extra name parts, which INSPIRE reads as initials and so widen the match', () => {
+    expect(hint('beyond_result_window')).toBe(
+      "Pin the person with a BAI, ORCID, or INSPIRE ID (cern_inspire_get_paper lists them for a paper's authors), then retry cern_inspire_search_authors; extra name parts widen a name search, since INSPIRE reads them as initials.",
+    );
+  });
+
+  it('routes an unreadable body to a later retry of the same page and limit, never a smaller limit that shifts the page', () => {
+    expect(hint('upstream_unreadable')).toBe(
+      'Retry this call in a few seconds; if it fails again, INSPIRE is likely serving an error page, so wait a minute before retrying cern_inspire_search_authors with the same page and limit.',
+    );
+  });
+
+  it('spells the recovery placeholders in capitals, which survive a markdown-to-HTML render', () => {
+    for (const { reason } of errors) expect(hint(reason)).not.toMatch(/<[A-Za-z]/);
   });
 });
 
@@ -339,16 +369,25 @@ describe('required enrichment', () => {
     const out = structured<Output>(result);
     expect(out).toMatchObject({
       authors: [],
+      page: 1,
+      limit: 5,
+      hasMore: false,
       totalCount: 0,
       truncated: false,
       shown: 0,
       cap: 5,
       matchedAs: 'name',
     });
+    expect(out.nextPage).toBeUndefined();
     expect(out.notice).toBeTypeOf('string');
     expect(fullText(result)).toContain('**0 total**');
     expect(fullText(result)).toContain('**Matched as:** `name`');
-    expect(bodyText(result)).toBe('## INSPIRE author profiles (0)');
+    expect(bodyText(result)).toBe(
+      [
+        '## INSPIRE author profiles, page 1',
+        '**Page:** 1 · **Limit:** 5 · **Profiles on this page:** 0 · **More pages:** no',
+      ].join('\n'),
+    );
   });
 
   it('writes every required field on an under-cap page and sets no notice', async () => {
@@ -378,29 +417,21 @@ describe('required enrichment', () => {
     expect(out.notice).toBeUndefined();
   });
 
-  it('marks a page truncated when more profiles matched than were returned', async () => {
-    routePage(pageOf(5, { total: 51_734 }));
+  it.each([5, 25])(
+    'offers the next page rather than a larger limit when limit %i leaves more profiles',
+    async (limit) => {
+      routePage(pageOf(limit, { next: true, total: 51_734 }));
 
-    const result = await run({ query: 'Doe' });
+      const result = await run({ query: 'Doe', limit });
 
-    const out = structured<Output>(result);
-    expect(out).toMatchObject({ truncated: true, shown: 5, cap: 5, totalCount: 51_734 });
-    expect(out.notice).toBe(
-      'More profiles matched; raise limit (max 25), add name parts, or search by BAI or ORCID to pin one person.',
-    );
-    expect(fullText(result)).toContain(out.notice as string);
-  });
-
-  it('uses the at-maximum wording when the limit is already 25', async () => {
-    routePage(pageOf(25, { total: 51_734 }));
-
-    const out = structured<Output>(await run({ query: 'Doe', limit: 25 }));
-
-    expect(out).toMatchObject({ truncated: true, shown: 25, cap: 25 });
-    expect(out.notice).toBe(
-      'More profiles matched than the 25 returned; add name parts, or search by BAI or ORCID to pin one person.',
-    );
-  });
+      const out = structured<Output>(result);
+      expect(out).toMatchObject({ truncated: true, shown: limit, cap: limit, totalCount: 51_734 });
+      expect(out.notice).toBe(
+        `More results: request page 2 with limit ${limit}. To pin one person, search by BAI or ORCID.`,
+      );
+      expect(fullText(result)).toContain(out.notice as string);
+    },
+  );
 
   it('reports totalCount from the match total, not the page length', async () => {
     routePage(pageOf(2, { total: 2 }));
@@ -408,6 +439,305 @@ describe('required enrichment', () => {
     const out = structured<Output>(await run({ query: 'Doe, Jane' }));
 
     expect(out).toMatchObject({ totalCount: 2, shown: 2, truncated: false });
+  });
+});
+
+describe('paging', () => {
+  /** Profiles numbered from `first`, so a later page carries its own recids and names. */
+  const rows = (first: number, count: number) =>
+    Array.from({ length: count }, (_, i) => author(first + i));
+
+  const pageParam = (n = 0) => h.requests[n]?.params.get('page');
+
+  it("returns the first page's rows when no page is given", async () => {
+    routePage(pageOf(3, { total: 3 }));
+
+    const out = structured<Output>(await run({ query: 'Doe' }));
+
+    expect(out.authors.map((a) => a.recid)).toEqual(['1000001', '1000002', '1000003']);
+    expect(out).toMatchObject({ shown: 3, cap: 5, totalCount: 3, truncated: false });
+    expect(params()?.get('size')).toBe('5');
+  });
+
+  it('sends page 1 for an omitted or blank page, returns the same rows, and echoes it on both surfaces', async () => {
+    routePage(pageOf(3, { total: 3 }));
+
+    const omitted = await run({ query: 'Doe' });
+    const blank = await run({ query: 'Doe', page: '' } as Input);
+
+    expect([pageParam(0), pageParam(1)]).toEqual(['1', '1']);
+    expect(structured<Output>(blank).authors).toEqual(structured<Output>(omitted).authors);
+    for (const result of [omitted, blank]) {
+      expect(structured<Output>(result)).toMatchObject({ page: 1, limit: 5, hasMore: false });
+      expect(bodyText(result)).toContain('## INSPIRE author profiles, page 1');
+    }
+  });
+
+  it('sends the requested page with the limit as its size, on every identifier route', async () => {
+    routePage(pageOf(1));
+
+    await run({ query: 'Doe, Jane', page: 3, limit: 7 });
+    await run({ query: 'Jane.Doe.1', page: 2 });
+
+    expect([pageParam(0), h.requests[0]?.params.get('size')]).toEqual(['3', '7']);
+    expect([pageParam(1), h.requests[1]?.params.get('q')]).toEqual(['2', 'ids.value:Jane.Doe.1']);
+  });
+
+  it("leaves INSPIRE's last page untruncated: hasMore follows links.next, not the match total", async () => {
+    routePage(authorPage(rows(11, 2), { total: 12 }));
+
+    const result = await run({ query: 'Doe', page: 3 });
+
+    const out = structured<Output>(result);
+    expect(out).toMatchObject({
+      page: 3,
+      limit: 5,
+      hasMore: false,
+      truncated: false,
+      shown: 2,
+      totalCount: 12,
+    });
+    expect(out.nextPage).toBeUndefined();
+    expect(out.notice).toBeUndefined();
+    expect(fullText(result)).not.toContain('Next page');
+  });
+
+  it('leaves a last page untruncated when it dropped a deleted profile', async () => {
+    routePage(authorPage([author(4), author(5, { deleted: true }), author(6)], { total: 6 }));
+
+    const out = structured<Output>(await run({ query: 'Doe', page: 2, limit: 3 }));
+
+    expect(out).toMatchObject({ shown: 2, totalCount: 6, truncated: false, hasMore: false });
+    expect(out.nextPage).toBeUndefined();
+    expect(out.notice).toBe(
+      '1 matching profile is marked deleted in INSPIRE and was dropped from this result.',
+    );
+  });
+
+  it('marks a page with a next link truncated, points at the next page, and keeps the narrowing advice', async () => {
+    routePage(pageOf(5, { next: true, total: 80_843 }));
+
+    const result = await run({ query: 'Doe' });
+
+    const out = structured<Output>(result);
+    expect(out).toMatchObject({
+      page: 1,
+      limit: 5,
+      hasMore: true,
+      truncated: true,
+      shown: 5,
+      cap: 5,
+      totalCount: 80_843,
+      nextPage: 2,
+      notice:
+        'More results: request page 2 with limit 5. To pin one person, search by BAI or ORCID.',
+    });
+    expect(fullText(result)).toContain('**Next page:** 2');
+    expect(fullText(result)).toContain(out.notice as string);
+    expect(bodyText(result)).toContain('**More pages:** yes');
+  });
+
+  it('counts the next page from the requested page and the limit given', async () => {
+    routePage(authorPage(rows(31, 5), { next: true, total: 900 }));
+
+    const out = structured<Output>(await run({ query: 'Doe', page: 7, limit: 5 }));
+
+    expect(out.nextPage).toBe(8);
+    expect(out.notice?.startsWith('More results: request page 8 with limit 5.')).toBe(true);
+    expect(pageParam()).toBe('7');
+  });
+
+  it('names the limit in the next-page notice, so sending exactly what it says keeps limit 25 rather than the default 5', async () => {
+    routePage(pageOf(25, { next: true, total: 80_843 }));
+
+    const result = await run({ query: 'Doe', limit: 25 });
+    const recipe = /request page (\d+) with limit (\d+)\./.exec(
+      structured<Output>(result).notice ?? '',
+    );
+    await run({ query: 'Doe', page: Number(recipe?.[1]), limit: Number(recipe?.[2]) });
+
+    expect(recipe?.slice(1)).toEqual(['2', '25']);
+    expect(fullText(result)).toContain(recipe?.[0]);
+    expect(h.requests.map((r) => [r.params.get('page'), r.params.get('size')])).toEqual([
+      ['1', '25'],
+      ['2', '25'],
+    ]);
+    expect(searchAuthorsTool.enrichment?.nextPage?.description).toContain('same limit');
+  });
+
+  it('takes hasMore from links.next on a page whose every raw hit is a deleted profile', async () => {
+    routePage(
+      authorPage([author(3, { deleted: true }), author(4, { deleted: true })], {
+        next: true,
+        total: 90,
+      }),
+    );
+
+    const result = await run({ query: 'Doe', page: 2, limit: 2 });
+
+    const out = structured<Output>(result);
+    expect(out).toMatchObject({
+      authors: [],
+      shown: 0,
+      totalCount: 90,
+      hasMore: true,
+      truncated: true,
+      nextPage: 3,
+    });
+    expect(out.notice).toBe(
+      'More results: request page 3 with limit 2. To pin one person, search by BAI or ORCID. 2 matching profiles are marked deleted in INSPIRE and were dropped from this result.',
+    );
+    expect(fullText(result)).toContain('**Next page:** 3');
+    expect(fullText(result)).not.toContain('past the last page');
+    expect(fullText(result)).not.toContain('No INSPIRE author profile matched');
+  });
+
+  it('reports a page past the end alone: the query did match', async () => {
+    routePage(authorPage([], { total: 12 }));
+
+    const result = await run({ query: 'Doe', page: 5 });
+
+    const out = structured<Output>(result);
+    expect(out).toMatchObject({
+      authors: [],
+      shown: 0,
+      totalCount: 12,
+      truncated: false,
+      hasMore: false,
+    });
+    expect(out.nextPage).toBeUndefined();
+    expect(out.notice).toBe('Page 5 is past the last page (3); request a lower page.');
+    expect(fullText(result)).toContain(out.notice as string);
+    expect(fullText(result)).not.toContain('No INSPIRE author profile matched');
+  });
+
+  it('numbers the last page from the effective limit when a reduced limit runs past the end', async () => {
+    routePage(authorPage([], { total: 51 }));
+
+    const out = structured<Output>(await run({ query: 'Doe', page: 4, limit: 26 }));
+
+    expect(out.notice).toBe(
+      'limit 26 reduced to 25. Page 4 is past the last page (3); request a lower page.',
+    );
+  });
+
+  it('gives the zero-hit notice, not the past-the-end one, when nothing matched on a later page', async () => {
+    routePage(emptyBody());
+
+    const out = structured<Output>(await run({ query: 'Zzzz, Nobody', page: 3 }));
+
+    expect(
+      out.notice?.startsWith('No INSPIRE author profile matched "Zzzz, Nobody" as name.'),
+    ).toBe(true);
+    expect(out.notice).not.toContain('past the last page');
+  });
+
+  it('keeps a last page that held only deleted profiles from reading as past the end', async () => {
+    routePage(authorPage([author(1, { deleted: true })], { total: 6 }));
+
+    const out = structured<Output>(await run({ query: 'Doe', page: 6, limit: 1 }));
+
+    expect(out).toMatchObject({ shown: 0, totalCount: 6, truncated: false, hasMore: false });
+    expect(out.notice).toBe(
+      '1 matching profile is marked deleted in INSPIRE and was dropped from this result.',
+    );
+  });
+
+  it('fails page × limit over 10,000 as beyond_result_window, before any request', async () => {
+    const result = await run({ query: 'Zhang, Wei', page: 401, limit: 25 });
+
+    const error = errorEnvelope(result);
+    expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(error.data?.reason).toBe('beyond_result_window');
+    expect(error.data).toMatchObject({ page: 401, limit: 25 });
+    expect(error.message).toContain('page 401 × limit 25');
+    expect(error.data?.recovery?.hint).toBe(hint('beyond_result_window'));
+    expect(fullText(result)).toContain('reason beyond_result_window');
+    expect(fullText(result)).toContain(`Recovery: ${hint('beyond_result_window')}`);
+    expect(h.requests).toHaveLength(0);
+  });
+
+  it.each([
+    [400, 25, false],
+    [401, 25, true],
+    [2000, 5, false],
+    [2001, 5, true],
+    [10_000, 1, false],
+    [10_001, 1, true],
+  ])('page %i × limit %i: past the window is %s', async (page, limit, rejected) => {
+    routePage(emptyBody());
+
+    const result = await run({ query: 'Doe', page, limit });
+
+    expect(result.isError === true).toBe(rejected);
+    expect(h.requests).toHaveLength(rejected ? 0 : 1);
+  });
+
+  it('checks the window against the effective limit, not the requested one', async () => {
+    routePage(pageOf(1, { total: 80_843 }));
+
+    const allowed = await run({ query: 'Doe', page: 400, limit: 26 });
+    const refused = await run({ query: 'Doe', page: 401, limit: 1_000_000 });
+
+    expect(allowed.isError).toBeFalsy();
+    expect(structured<Output>(allowed).notice).toContain('limit 26 reduced to 25.');
+    expect(h.requests[0]?.params.get('size')).toBe('25');
+    expect(errorEnvelope(refused).data).toMatchObject({
+      reason: 'beyond_result_window',
+      page: 401,
+      limit: 25,
+    });
+    expect(h.requests).toHaveLength(1);
+  });
+
+  it('withholds a next page that would cross the window, under a reduced limit too, and says to narrow', async () => {
+    routePage(authorPage(rows(9976, 25), { next: true, total: 80_843 }));
+
+    const result = await run({ query: 'Doe', page: 400, limit: 1_000_000 });
+
+    const out = structured<Output>(result);
+    expect(out).toMatchObject({ truncated: true, hasMore: true, shown: 25, cap: 25, limit: 25 });
+    expect(out.nextPage).toBeUndefined();
+    expect(out.notice).toBe(
+      'limit 1000000 reduced to 25. INSPIRE serves only the first 10,000 results of a query; to pin one person, search by BAI or ORCID.',
+    );
+    expect(out.notice).not.toContain('request page');
+    expect(fullText(result)).not.toContain('Next page');
+  });
+
+  it('offers the last reachable next page at the 10,000-result window edge', async () => {
+    routePage(authorPage(rows(9951, 25), { next: true, total: 80_843 }));
+
+    const out = structured<Output>(await run({ query: 'Doe', page: 399, limit: 25 }));
+
+    expect(out.nextPage).toBe(400);
+    expect(out.notice?.startsWith('More results: request page 400 with limit 25.')).toBe(true);
+  });
+
+  it('names the page and numbers rows from (page − 1) × limit + 1 in content[]', async () => {
+    routePage(authorPage(rows(11, 2), { next: true, total: 40 }));
+
+    const result = await run({ query: 'Doe', page: 3, limit: 5 });
+
+    const text = bodyText(result);
+    expect(text).toContain('## INSPIRE author profiles, page 3');
+    expect(text).toContain(
+      '**Page:** 3 · **Limit:** 5 · **Profiles on this page:** 2 · **More pages:** yes',
+    );
+    expect(lines(result).filter((line) => line.startsWith('### '))).toEqual([
+      '### 11. Doe, Jane 11',
+      '### 12. Doe, Jane 12',
+    ]);
+    expect(structured<Output>(result)).toMatchObject({ page: 3, limit: 5, hasMore: true });
+  });
+
+  it('numbers rows from the effective limit when the requested one was reduced', async () => {
+    routePage(authorPage(rows(26, 1), { total: 26 }));
+
+    const result = await run({ query: 'Doe', page: 2, limit: 26 });
+
+    expect(bodyText(result)).toContain('**Page:** 2 · **Limit:** 25');
+    expect(bodyText(result)).toContain('### 26. Doe, Jane 26');
   });
 });
 
@@ -492,9 +822,13 @@ describe('surname-miss notice', () => {
   const surnameMiss = (query: string) =>
     `No profile on this page has a surname in "${query}"; INSPIRE widened the match by reading name parts as initials, so these may be other people. Check the spelling, or search by BAI or ORCID.`;
 
-  it('flags a misspelled surname whose page holds only namesakes-by-initial, ahead of the more-matched line', async () => {
+  const laterPageMiss = (query: string) =>
+    `No profile on this page has a surname in "${query}"; past the profiles that carry the surname, INSPIRE lists ones matched only through name parts read as initials, so these may be other people. If no earlier page listed the surname, check the spelling; to pin one person, search by BAI or ORCID.`;
+
+  it('flags a misspelled surname whose page holds only namesakes-by-initial, ahead of the next-page line', async () => {
     routePage(
       authorPage([named(1, 'Magana, Juan'), named(2, 'Mendez, Juan'), named(3, 'Luo, Juan-juan')], {
+        next: true,
         total: 251_959,
       }),
     );
@@ -509,11 +843,29 @@ describe('surname-miss notice', () => {
     ]);
     expect(out).toMatchObject({ matchedAs: 'name', truncated: true, totalCount: 251_959 });
     expect(out.notice).toBe(
-      `${surnameMiss('Maldecena, Juan')} More profiles matched; raise limit (max 25), add name parts, or search by BAI or ORCID to pin one person.`,
+      `${surnameMiss('Maldecena, Juan')} More results: request page 2 with limit 3. To pin one person, search by BAI or ORCID.`,
     );
     expect(fullText(result)).toContain(
       'INSPIRE widened the match by reading name parts as initials',
     );
+  });
+
+  it('on a later page, flags the initials-only tail without calling it a misspelling', async () => {
+    routePage(
+      authorPage([named(1, 'Tian, Zehua'), named(2, 'Zoller, Philippe')], {
+        next: true,
+        total: 80_843,
+      }),
+    );
+
+    const result = await run({ query: 'Zhang, Wei', page: 400, limit: 2 });
+
+    const out = structured<Output>(result);
+    expect(out.notice).toBe(
+      `${laterPageMiss('Zhang, Wei')} More results: request page 401 with limit 2. To pin one person, search by BAI or ORCID.`,
+    );
+    expect(out.notice).not.toContain('Check the spelling');
+    expect(fullText(result)).toContain(laterPageMiss('Zhang, Wei'));
   });
 
   it('flags a name without a comma whose parts are no returned surname', async () => {
@@ -634,7 +986,7 @@ describe('deleted profiles', () => {
     expect(out.notice).toBe(
       '1 matching profile is marked deleted in INSPIRE and was dropped from this result.',
     );
-    expect(bodyText(result)).toContain('## INSPIRE author profiles (2)');
+    expect(bodyText(result)).toContain('**Profiles on this page:** 2');
   });
 
   it('pluralizes the notice for several dropped profiles', async () => {
@@ -657,13 +1009,13 @@ describe('deleted profiles', () => {
     expect(out.notice).toContain('2 matching profiles are marked deleted');
   });
 
-  it('puts the more-matched line ahead of the dropped-profile line when both apply', async () => {
-    routePage(authorPage([author(1), deleted(2), author(3)], { total: 90 }));
+  it('puts the next-page line ahead of the dropped-profile line when both apply', async () => {
+    routePage(authorPage([author(1), deleted(2), author(3)], { next: true, total: 90 }));
 
-    const out = structured<Output>(await run({ query: 'Doe' }));
+    const out = structured<Output>(await run({ query: 'Doe', limit: 3 }));
 
-    expect(out).toMatchObject({ truncated: true, shown: 2, totalCount: 90 });
-    expect(out.notice?.startsWith('More profiles matched; raise limit')).toBe(true);
+    expect(out).toMatchObject({ truncated: true, shown: 2, totalCount: 90, nextPage: 2 });
+    expect(out.notice?.startsWith('More results: request page 2 with limit 3.')).toBe(true);
     expect(out.notice).toContain('1 matching profile is marked deleted');
   });
 });
@@ -710,7 +1062,10 @@ describe('profiles and format() parity', () => {
 
     const text = bodyText(await run({ query: 'Jane.Doe.1' }));
 
-    expect(text).toContain('## INSPIRE author profiles (1)');
+    expect(text).toContain('## INSPIRE author profiles, page 1');
+    expect(text).toContain(
+      '**Page:** 1 · **Limit:** 5 · **Profiles on this page:** 1 · **More pages:** no',
+    );
     expect(text).toContain('### 1. Doe, Jane (preferred: Jane Doe)');
     expect(text).toContain(
       '**recid:** 1000001 · **BAI:** Jane.Doe.1 · **ORCID:** 0000-0002-1825-0097 · **INSPIRE ID:** INSPIRE-00000001',
@@ -792,7 +1147,8 @@ describe('profiles and format() parity', () => {
     });
     expect(bodyText(result)).toBe(
       [
-        '## INSPIRE author profiles (1)',
+        '## INSPIRE author profiles, page 1',
+        '**Page:** 1 · **Limit:** 5 · **Profiles on this page:** 1 · **More pages:** no',
         '',
         '### 1. Roe, Richard',
         '**recid:** 7',
@@ -921,7 +1277,7 @@ describe('upstream text stays out of inline markdown slots', () => {
     expect(shape(hostile)).toEqual(shape(benign));
     expect(lines(hostile).some((line) => line.startsWith('# Injected'))).toBe(false);
     expect(lines(hostile).filter((line) => line.startsWith('#'))).toEqual([
-      '## INSPIRE author profiles (1)',
+      '## INSPIRE author profiles, page 1',
       '### 1. Doe, Jane # Injected heading \\*\\*Status:\\*\\* forged (preferred: Jane Doe # Injected heading \\*\\*Status:\\*\\* forged)',
     ]);
   });
@@ -993,7 +1349,7 @@ describe('upstream text stays out of inline markdown slots', () => {
 
     const body = lines(result);
     expect(body.filter((line) => line.startsWith('#'))).toEqual([
-      '## INSPIRE author profiles (1)',
+      '## INSPIRE author profiles, page 1',
       '### 1. Doe, Jane (preferred: Jane Doe)',
     ]);
     expect(body).toContain('- \\# Forged heading');

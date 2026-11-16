@@ -26,6 +26,7 @@ import {
   classifyPaperId,
   normalizePaperId,
   paperIdKey,
+  recidOrTextQuery,
   routeAuthorQuery,
 } from './identifiers.js';
 import {
@@ -37,21 +38,26 @@ import {
   toExperimentRecord,
   toHepdataAvailability,
   toHepdataRecord,
+  toInstitutionRecord,
   toLiteratureHit,
   toPaperLookup,
 } from './normalize.js';
 import type {
   AuthorSearchPage,
+  AuthorSearchParams,
   CitationExport,
   CitationExportParams,
   CitationSummaryLookup,
   CitationSummaryParams,
   ExperimentSearchPage,
+  ExperimentSearchParams,
   FacetFilters,
   HepdataAvailability,
   HepdataLookup,
   HepdataSearchPage,
   HepdataSearchParams,
+  InstitutionSearchPage,
+  InstitutionSearchParams,
   LiteratureSearchPage,
   LiteratureSearchParams,
   PaperLookup,
@@ -60,6 +66,7 @@ import type {
   RawCitationsByYearResponse,
   RawDataMetadata,
   RawExperimentMetadata,
+  RawInstitutionMetadata,
   RawLiteratureMetadata,
   RawSearchEnvelope,
   ResolvedAuthor,
@@ -123,6 +130,12 @@ const LITERATURE_SEARCH_FIELDS = [
   'abstracts.source',
 ].join(',');
 
+/**
+ * Contributors and thesis supervisors are selected by projection, never whole:
+ * `authors.emails` and `supervisors.emails` hold addresses INSPIRE's terms bar
+ * collecting in bulk. `publication_info` carries the conference number and the
+ * conference and parent-record links.
+ */
 const PAPER_DOSSIER_FIELDS = [
   'control_number',
   'titles',
@@ -132,6 +145,11 @@ const PAPER_DOSSIER_FIELDS = [
   'authors.record',
   'authors.ids',
   'authors.inspire_roles',
+  'supervisors.full_name',
+  'supervisors.affiliations.value',
+  'supervisors.record',
+  'supervisors.ids',
+  'supervisors.inspire_roles',
   'documents.url',
   'documents.filename',
   'documents.description',
@@ -144,6 +162,7 @@ const PAPER_DOSSIER_FIELDS = [
   'arxiv_eprints',
   'dois',
   'publication_info',
+  'thesis_info',
   'report_numbers',
   'keywords',
   'inspire_categories',
@@ -198,6 +217,20 @@ const EXPERIMENT_FIELDS = [
   'core',
 ].join(',');
 
+/** `ICN` is left out: most records hold only "obsolete" there. */
+const INSTITUTION_FIELDS = [
+  'control_number',
+  'legacy_ICN',
+  'institution_hierarchy',
+  'institution_type',
+  'addresses.cities',
+  'addresses.country_code',
+  'number_of_papers',
+  'related_records.record',
+  'related_records.relation',
+  'inactive',
+].join(',');
+
 const HEPDATA_SEARCH_FIELDS = [
   'control_number',
   'titles.title',
@@ -233,6 +266,7 @@ type InspirePath =
   | '/literature/facets'
   | '/authors'
   | '/experiments'
+  | '/institutions'
   | '/data';
 
 /** Every query parameter INSPIRE is ever sent. Caller keys never reach the URL. */
@@ -803,16 +837,18 @@ export class InspireService {
   // ─── Authors ──────────────────────────────────────────────────────────────
 
   /**
-   * Author profiles for a name or identifier (normalize it with
+   * One page of author profiles for a name or identifier (normalize it with
    * `normalizeAuthorId` first). Identifiers route to exact `ids.value:` /
    * `control_number:` queries, anything else to free text. Profiles marked
-   * deleted are dropped and counted in `deletedDropped`.
+   * deleted are dropped and counted in `deletedDropped`; `hasMore` is INSPIRE's
+   * `links.next`, which counts the raw page, so a dropped profile never ends
+   * paging early.
    */
-  async searchAuthors(query: string, limit: number, call: InspireCall): Promise<AuthorSearchPage> {
-    const route = routeAuthorQuery(query);
+  async searchAuthors(params: AuthorSearchParams, call: InspireCall): Promise<AuthorSearchPage> {
+    const route = routeAuthorQuery(params.query);
     const envelope = await this.send(
       '/authors',
-      { q: route.q, fields: AUTHOR_FIELDS, size: limit },
+      { q: route.q, fields: AUTHOR_FIELDS, size: params.size, page: params.page },
       call,
       'searchAuthors',
       parseSearchEnvelope<RawAuthorMetadata>,
@@ -821,6 +857,7 @@ export class InspireService {
     return {
       matchedAs: route.matchedAs,
       total: envelope.hits.total,
+      hasMore: Boolean(envelope.links?.next),
       authors: live.map(toAuthorProfile),
       deletedDropped: envelope.hits.hits.length - live.length,
     };
@@ -954,26 +991,62 @@ export class InspireService {
   // ─── Experiments ──────────────────────────────────────────────────────────
 
   /**
-   * Experiments, collaborations, and facilities by free text; a query of digits
-   * only is a recid (`control_number:<n>` — digits as free text match nothing).
+   * One page of experiments, collaborations, and facilities by free text; a
+   * query of digits only is a recid (`control_number:<n>` — digits as free text
+   * match nothing). `hasMore` is INSPIRE's `links.next`.
    */
   async searchExperiments(
-    query: string,
-    limit: number,
+    params: ExperimentSearchParams,
     call: InspireCall,
   ): Promise<ExperimentSearchPage> {
     const envelope = await this.send(
       '/experiments',
       {
-        q: /^\d{1,9}$/.test(query) ? `control_number:${query}` : query,
+        q: recidOrTextQuery(params.query),
         fields: EXPERIMENT_FIELDS,
-        size: limit,
+        size: params.size,
+        page: params.page,
       },
       call,
       'searchExperiments',
       parseSearchEnvelope<RawExperimentMetadata>,
     );
-    return { total: envelope.hits.total, experiments: envelope.hits.hits.map(toExperimentRecord) };
+    return {
+      total: envelope.hits.total,
+      hasMore: Boolean(envelope.links?.next),
+      experiments: envelope.hits.hits.map(toExperimentRecord),
+    };
+  }
+
+  // ─── Institutions ─────────────────────────────────────────────────────────
+
+  /**
+   * One page of institution records in INSPIRE's order. A query of digits only
+   * is a recid (`control_number:<n>`); anything else is sent as written, so
+   * `legacy_ICN:"NAME"` matches one recorded name exactly. `hasMore` is
+   * INSPIRE's `links.next`.
+   */
+  async searchInstitutions(
+    params: InstitutionSearchParams,
+    call: InspireCall,
+  ): Promise<InstitutionSearchPage> {
+    const envelope = await this.send(
+      '/institutions',
+      {
+        q: recidOrTextQuery(params.query),
+        fields: INSTITUTION_FIELDS,
+        size: params.size,
+        page: params.page,
+      },
+      call,
+      'searchInstitutions',
+      parseSearchEnvelope<RawInstitutionMetadata>,
+    );
+    return {
+      total: envelope.hits.total,
+      hasMore: Boolean(envelope.links?.next),
+      institutions: envelope.hits.hits.map(toInstitutionRecord),
+    };
   }
 
   // ─── HEPData index (INSPIRE `data` collection) ─────────────────────────────

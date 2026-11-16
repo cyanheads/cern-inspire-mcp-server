@@ -23,12 +23,13 @@ import {
   type PaperDossierOutput,
   paperDossierSchema,
 } from '@/mcp-server/tools/definitions/get-paper.tool.js';
-import type { RawDataMetadata } from '@/services/inspire/types.js';
+import type { RawDataMetadata, RawLiteratureMetadata } from '@/services/inspire/types.js';
 import { describeFailureClasses } from '../fixtures/failure-suite.js';
 import { AUTHOR_PAGE_BOUNDARY } from '../fixtures/inspire-authors.js';
 import { PROCEEDINGS_METADATA } from '../fixtures/inspire-documents.js';
 import { MARKUP_AS_TEXT, MARKUP_FREE, PUBLISHER_MARKUP } from '../fixtures/inspire-markup.js';
 import {
+  CONFERENCE_PAPERS,
   dataMetadata,
   dataPage,
   dossierMetadata,
@@ -47,6 +48,8 @@ import {
   rateLimitResponse,
   searchBody,
   sparseLiteratureMetadata,
+  supervisorEntry,
+  THESES,
   TWO_RECORD_PAPERS,
   TWO_VERSION_DOIS,
 } from '../fixtures/inspire-upstream.js';
@@ -63,6 +66,7 @@ import {
   leaves,
   structured,
   type ToolResult,
+  textBlocks,
 } from '../fixtures/tool-result.js';
 
 vi.mock('@/services/inspire/inspire-service.js', async (importOriginal) =>
@@ -1623,6 +1627,521 @@ describe('the dossier and format() parity', () => {
     const result = await run({ paper: HIGGS.recid });
 
     expect(result.content.every((block) => block.type === 'text')).toBe(true);
+  });
+
+  it('serves records without supervisors, thesis details, or conference links byte for byte as before on both surfaces', async () => {
+    const surfaces: { structuredContent: unknown; content: string[] }[] = [];
+    const records: [string, RawLiteratureMetadata][] = [
+      [HIGGS.recid, richRecord()],
+      ['1000', { ...sparseLiteratureMetadata(), publication_info: [{ year: 1961 }] }],
+      ['1500425', PROCEEDINGS_METADATA],
+    ];
+    for (const [paper, metadata] of records) {
+      h = startHarness();
+      routeRecord(metadata);
+      routeData(paper === HIGGS.recid ? dataPage() : emptyBody());
+      const result = await run({ paper });
+      surfaces.push({ structuredContent: result.structuredContent, content: textBlocks(result) });
+    }
+    expect(JSON.stringify(surfaces, null, 2)).toMatchInlineSnapshot(`
+      "[
+        {
+          "structuredContent": {
+            "recid": "1124337",
+            "resolvedAs": "recid",
+            "title": "Observation of a new particle in the search for the Standard Model Higgs boson",
+            "alternateTitles": [
+              "Observation of a new boson at a mass of 125 GeV"
+            ],
+            "abstract": "Preprint abstract of the Higgs search.",
+            "abstractSource": "arXiv",
+            "authorCount": 2,
+            "authorOffset": 0,
+            "authors": [
+              {
+                "name": "Doe, Jane 1",
+                "recid": "2000000",
+                "bai": "Jane.Doe.1",
+                "affiliations": [
+                  "Example Institute"
+                ]
+              },
+              {
+                "name": "Doe, Jane 2",
+                "recid": "2000001",
+                "bai": "Jane.Doe.2",
+                "affiliations": [
+                  "Example Institute"
+                ]
+              }
+            ],
+            "collaborations": [
+              "ATLAS",
+              "CMS"
+            ],
+            "experiments": [
+              {
+                "name": "CERN-LHC-ATLAS",
+                "recid": "1108541"
+              }
+            ],
+            "date": "2012-09-17",
+            "preprintDate": "2012-07-31",
+            "publicationDate": "2012-09-17",
+            "publications": [
+              {
+                "journal": "Phys.Lett.B",
+                "volume": "716",
+                "year": 2012,
+                "pages": "1-29"
+              },
+              {
+                "journal": "Eur.Phys.J.C",
+                "volume": "99",
+                "year": 2020,
+                "articleId": "012345"
+              },
+              {
+                "freetext": "Proceedings of a workshop"
+              }
+            ],
+            "arxivId": "1207.7214",
+            "arxivCategories": [
+              "hep-ex"
+            ],
+            "dois": [
+              "10.1016/j.physletb.2012.08.020"
+            ],
+            "reportNumbers": [
+              "CERN-PH-EP-2012-218"
+            ],
+            "keywords": [
+              "Higgs particle"
+            ],
+            "subjects": [
+              "Experiment-HEP"
+            ],
+            "documentTypes": [
+              "article",
+              "published"
+            ],
+            "refereed": true,
+            "citeable": true,
+            "core": true,
+            "numberOfPages": 29,
+            "citationCount": 12345,
+            "citationCountWithoutSelf": 11800,
+            "texkeys": [
+              "ATLAS:2012yve",
+              "Aad:2012tfa"
+            ],
+            "documents": [],
+            "urls": [
+              {
+                "url": "https://example.org/higgs",
+                "description": "Project page"
+              }
+            ],
+            "licenses": [
+              {
+                "url": "https://creativecommons.org/licenses/by/4.0/",
+                "imposing": "Publisher"
+              }
+            ],
+            "inspireUrl": "https://inspirehep.net/literature/1124337",
+            "citingQuery": "refersto:recid:1124337",
+            "referencesQuery": "citedby:recid:1124337",
+            "hepdata": {
+              "status": "available",
+              "inspireDataRecid": "1860001",
+              "recordDoi": "10.17182/hepdata.89456",
+              "latestVersion": 2,
+              "tableCount": 3,
+              "hepdataUrl": "https://www.hepdata.net/record/89456"
+            },
+            "truncated": false,
+            "shown": 2,
+            "cap": 25
+          },
+          "content": [
+            "## Observation of a new particle in the search for the Standard Model Higgs boson\\n**recid:** 1124337 (resolved from recid) · **INSPIRE:** https://inspirehep.net/literature/1124337\\n**Date:** 2012-09-17 · **Preprint date:** 2012-07-31 · **Publication date:** 2012-09-17\\n**Citations:** 12345 (11800 without self-citations)\\n**Document types:** article, published · **Refereed:** yes · **Citeable:** yes · **Core:** yes · **Pages:** 29\\n**arXiv:** 1207.7214 (hep-ex) · **DOIs:** 10.1016/j.physletb.2012.08.020 · **Report numbers:** CERN-PH-EP-2012-218\\n**Subjects:** Experiment-HEP\\n**Collaborations:** ATLAS, CMS\\n**Experiments:** CERN-LHC-ATLAS (experiment recid 1108541)\\n**Alternate titles:** Observation of a new boson at a mass of 125 GeV\\n\\n### Publication\\n- Phys.Lett.B 716 (2012) 1-29\\n- Eur.Phys.J.C 99 (2020) article 012345\\n- Proceedings of a workshop\\n\\n### Abstract (source: arXiv)\\n> Preprint abstract of the Higgs search.\\n\\n### Contributors (2 shown of 2)\\n**Author offset:** 0 · **Positions:** 1–2\\n- **Doe, Jane 1** (author recid 2000000 · BAI Jane.Doe.1) — Example Institute\\n- **Doe, Jane 2** (author recid 2000001 · BAI Jane.Doe.2) — Example Institute\\n\\n**Keywords:** Higgs particle\\n\\n**Texkeys:** ATLAS:2012yve, Aad:2012tfa\\n\\n### Links\\n- https://example.org/higgs — Project page\\n\\n### Licenses\\n- https://creativecommons.org/licenses/by/4.0/ (imposed by Publisher)\\n\\n### HEPData\\n**Status:** available — HEPData holds numerical tables for this paper\\n**Record DOI:** 10.17182/hepdata.89456 · **Latest version:** 2 · **Tables:** 3 · **INSPIRE data recid:** 1860001\\n**Record page:** https://www.hepdata.net/record/89456\\n\\n### Follow-up queries\\n**Citing papers:** \`refersto:recid:1124337\` · **References:** \`citedby:recid:1124337\` (pass to cern_inspire_search_literature)",
+            "\\n\\n**truncated:** false\\n**shown:** 2\\n**cap:** 25"
+          ]
+        },
+        {
+          "structuredContent": {
+            "recid": "1000",
+            "resolvedAs": "recid",
+            "title": "Partial symmetries of weak interactions",
+            "alternateTitles": [],
+            "authorCount": 0,
+            "authorOffset": 0,
+            "authors": [],
+            "collaborations": [],
+            "experiments": [],
+            "date": "1961",
+            "publications": [
+              {
+                "year": 1961
+              }
+            ],
+            "arxivCategories": [],
+            "dois": [],
+            "reportNumbers": [],
+            "keywords": [],
+            "subjects": [],
+            "documentTypes": [
+              "article"
+            ],
+            "citationCount": 0,
+            "texkeys": [],
+            "documents": [],
+            "urls": [],
+            "licenses": [],
+            "inspireUrl": "https://inspirehep.net/literature/1000",
+            "citingQuery": "refersto:recid:1000",
+            "referencesQuery": "citedby:recid:1000",
+            "hepdata": {
+              "status": "none"
+            },
+            "truncated": false,
+            "shown": 0,
+            "cap": 25
+          },
+          "content": [
+            "## Partial symmetries of weak interactions\\n**recid:** 1000 (resolved from recid) · **INSPIRE:** https://inspirehep.net/literature/1000\\n**Date:** 1961\\n**Citations:** 0\\n**Document types:** article\\n\\n### Publication\\n- (1961)\\n\\n### Contributors (0 shown of 0)\\n**Author offset:** 0\\n\\n### HEPData\\n**Status:** none — HEPData holds no record for this paper\\n\\n### Follow-up queries\\n**Citing papers:** \`refersto:recid:1000\` · **References:** \`citedby:recid:1000\` (pass to cern_inspire_search_literature)",
+            "\\n\\n**truncated:** false\\n**shown:** 0\\n**cap:** 25"
+          ]
+        },
+        {
+          "structuredContent": {
+            "recid": "1500425",
+            "resolvedAs": "recid",
+            "title": "",
+            "alternateTitles": [],
+            "authorCount": 3,
+            "authorOffset": 0,
+            "authors": [
+              {
+                "name": "Dahmke, Stefan K.G.",
+                "roles": [
+                  "editor"
+                ],
+                "affiliations": []
+              },
+              {
+                "name": "Meyer, Mikko",
+                "roles": [
+                  "editor"
+                ],
+                "affiliations": []
+              },
+              {
+                "name": "Vanhoefer, Laura",
+                "roles": [
+                  "editor"
+                ],
+                "affiliations": []
+              }
+            ],
+            "collaborations": [],
+            "experiments": [],
+            "publications": [],
+            "arxivCategories": [],
+            "dois": [],
+            "reportNumbers": [],
+            "keywords": [],
+            "subjects": [],
+            "documentTypes": [],
+            "citationCount": 0,
+            "texkeys": [],
+            "documents": [
+              {
+                "url": "https://inspirehep.net/files/357195b6adc92a693a72ec7c49bb90df",
+                "filename": "fulltext.pdf",
+                "fulltext": true
+              }
+            ],
+            "urls": [],
+            "licenses": [],
+            "inspireUrl": "https://inspirehep.net/literature/1500425",
+            "citingQuery": "refersto:recid:1500425",
+            "referencesQuery": "citedby:recid:1500425",
+            "hepdata": {
+              "status": "none"
+            },
+            "truncated": false,
+            "shown": 3,
+            "cap": 25
+          },
+          "content": [
+            "## (untitled)\\n**recid:** 1500425 (resolved from recid) · **INSPIRE:** https://inspirehep.net/literature/1500425\\n**Citations:** 0\\n\\n### Contributors (3 shown of 3)\\n**Author offset:** 0 · **Positions:** 1–3\\n- **Dahmke, Stefan K.G.** — roles: editor\\n- **Meyer, Mikko** — roles: editor\\n- **Vanhoefer, Laura** — roles: editor\\n\\n### Attached documents\\n- [fulltext.pdf](<https://inspirehep.net/files/357195b6adc92a693a72ec7c49bb90df>) — filename: fulltext.pdf · fulltext: yes\\n\\n### HEPData\\n**Status:** none — HEPData holds no record for this paper\\n\\n### Follow-up queries\\n**Citing papers:** \`refersto:recid:1500425\` · **References:** \`citedby:recid:1500425\` (pass to cern_inspire_search_literature)",
+            "\\n\\n**truncated:** false\\n**shown:** 3\\n**cap:** 25"
+          ]
+        }
+      ]"
+    `);
+  });
+});
+
+describe('thesis supervisors, thesis details, and conference links', () => {
+  const runRecord = async (metadata: RawLiteratureMetadata, input: Partial<Input> = {}) => {
+    h = startHarness();
+    routeRecord(metadata);
+    routeData(emptyBody());
+    return await run({ paper: String(metadata.control_number), ...input });
+  };
+
+  it('returns a PhD thesis with its supervisor, degree, institution, and date on both surfaces (2680186)', async () => {
+    const result = await runRecord(THESES.phd);
+
+    const out = structured<Dossier>(result);
+    expect(out).toEqual(expect.schemaMatching(getPaperTool.output));
+    expect(out.authors).toEqual([{ name: 'Doe, Jane 1', affiliations: [] }]);
+    expect(out.authorCount).toBe(1);
+    expect(out.supervisors).toEqual([
+      {
+        name: 'Roe, Richard 1',
+        roles: ['supervisor'],
+        recid: '3000001',
+        bai: 'Richard.Roe.1',
+        affiliations: [],
+      },
+    ]);
+    expect(out.thesis).toEqual({
+      degreeType: 'PhD',
+      institutions: [{ name: 'Calcutta U.', recid: '903457' }],
+      date: '2023',
+    });
+    expect(out.publications).toEqual([{ year: 2023 }]);
+    const text = bodyText(result);
+    expect(text).toContain(
+      [
+        '### Thesis',
+        '**Degree type:** PhD · **Date:** 2023',
+        '**Institutions:**',
+        '- Calcutta U. (institution recid 903457)',
+      ].join('\n'),
+    );
+    expect(text).toContain(
+      [
+        '### Supervisors (1)',
+        '- **Roe, Richard 1** — roles: supervisor (author recid 3000001 · BAI Richard.Roe.1)',
+      ].join('\n'),
+    );
+    expect(text).toContain('### Contributors (1 shown of 1)');
+    expect(text).not.toContain('Defense date');
+  });
+
+  it("lists a Master's institution once when INSPIRE records it unlinked and linked (2859264)", async () => {
+    const result = await runRecord(THESES.master);
+
+    const out = structured<Dossier>(result);
+    expect(out.thesis).toEqual({
+      degreeType: 'Master',
+      institutions: [{ name: 'Minas Gerais U.', recid: '908193' }],
+      defenseDate: '2024-10-25',
+      date: '2024-12-13',
+    });
+    expect(out.supervisors?.[0]?.affiliations).toEqual(['Minas Gerais U.']);
+    const text = bodyText(result);
+    expect(text).toContain(
+      [
+        '### Thesis',
+        '**Degree type:** Master · **Defense date:** 2024-10-25 · **Date:** 2024-12-13',
+        '**Institutions:**',
+        '- Minas Gerais U. (institution recid 908193)',
+      ].join('\n'),
+    );
+    expect(text).toContain(
+      '- **Roe, Richard 2** — roles: supervisor (author recid 3000002 · BAI Richard.Roe.2) — Minas Gerais U.',
+    );
+    expect(text.match(/Minas Gerais U\./g)).toHaveLength(2);
+  });
+
+  it('keeps two distinct thesis institutions, the unlinked one included, in record order (2866041)', async () => {
+    const result = await runRecord(THESES.joint);
+
+    expect(structured<Dossier>(result).thesis?.institutions).toEqual([
+      { name: 'Laboratoire de Physique de Clermont, France' },
+      { name: 'Tech. U., Dortmund (main)', recid: '1088595' },
+    ]);
+    expect(bodyText(result)).toContain(
+      [
+        '**Institutions:**',
+        '- Laboratoire de Physique de Clermont, France',
+        '- Tech. U., Dortmund (main) (institution recid 1088595)',
+      ].join('\n'),
+    );
+  });
+
+  it('keeps a conference-only publication entry as its own entry (1959589)', async () => {
+    const result = await runRecord(CONFERENCE_PAPERS.icm);
+
+    expect(structured<Dossier>(result).publications).toEqual([
+      { year: 2023 },
+      { cnum: 'C22-07-06.1', conferenceRecid: '1915801' },
+    ]);
+    expect(bodyText(result)).toContain(
+      ['### Publication', '- (2023)', '- CNUM C22-07-06.1 · conference recid 1915801'].join('\n'),
+    );
+  });
+
+  it('carries the conference and parent records of a proceedings contribution (18076)', async () => {
+    const result = await runRecord(CONFERENCE_PAPERS.proceedings);
+
+    const out = structured<Dossier>(result);
+    expect(out.publications).toEqual([
+      { journal: 'Phys.Rev.D', volume: '34', year: 1986, pages: '1642', articleId: '1642' },
+      { cnum: 'C86-07-16', conferenceRecid: '965760', parentRecid: '256605' },
+      { pages: '235-238', parentRecid: '568498' },
+    ]);
+    expect(out.supervisors).toBeUndefined();
+    expect(out.thesis).toBeUndefined();
+    const text = bodyText(result);
+    expect(text).toContain(
+      [
+        '### Publication',
+        '- Phys.Rev.D 34 (1986) 1642 article 1642',
+        '- CNUM C86-07-16 · conference recid 965760 · parent recid 256605',
+        '- 235-238 · parent recid 568498',
+      ].join('\n'),
+    );
+    expect(text).not.toContain('### Supervisors');
+    expect(text).not.toContain('### Thesis');
+  });
+
+  it.each([
+    [
+      'journal data and a CNUM',
+      {
+        journal_title: 'Phys.Rev.D',
+        journal_volume: '34',
+        page_start: '1642',
+        cnum: 'C86-07-16',
+        conference_record: { $ref: 'https://inspirehep.net/api/conferences/965760' },
+      },
+      {
+        journal: 'Phys.Rev.D',
+        volume: '34',
+        pages: '1642',
+        cnum: 'C86-07-16',
+        conferenceRecid: '965760',
+      },
+      '- Phys.Rev.D 34 1642 · CNUM C86-07-16 · conference recid 965760',
+    ],
+    [
+      'free text in a parent record',
+      {
+        pubinfo_freetext: 'Proc. of a workshop',
+        parent_record: { $ref: 'https://inspirehep.net/api/literature/1' },
+      },
+      { freetext: 'Proc. of a workshop', parentRecid: '1' },
+      '- Proc. of a workshop · parent recid 1',
+    ],
+    ['a CNUM only', { cnum: 'C*_1' }, { cnum: 'C*_1' }, '- CNUM C*_1'],
+  ])('renders an entry with %s', async (_label, entry, publication, line) => {
+    const result = await runRecord({ ...CONFERENCE_PAPERS.icm, publication_info: [entry] });
+
+    expect(structured<Dossier>(result).publications).toEqual([publication]);
+    expect(bodyText(result).split('\n')).toContain(line);
+  });
+
+  it.each([
+    ['a zero budget', { max_authors: 0 }],
+    ['the first contributor', { max_authors: 1 }],
+    ['the second contributor', { max_authors: 1, author_offset: 1 }],
+    ['an offset past the end', { author_offset: 5 }],
+  ] as const)(
+    'lists all six supervisors at %s and pages the contributors as without them',
+    async (_label, input) => {
+      const contributors = {
+        ...omit(THESES.master, 'supervisors'),
+        author_count: 2,
+        authors: [{ full_name: 'Doe, Jane A' }, { full_name: 'Doe, Jane B' }],
+      };
+      const supervisors = Array.from({ length: 6 }, (_, i) => supervisorEntry(i + 1));
+      const without = await runRecord(contributors, input);
+      const result = await runRecord({ ...contributors, supervisors }, input);
+
+      const { supervisors: listed, ...rest } = structured<Dossier>(result);
+      expect(listed?.map((s) => s.name)).toEqual(supervisors.map((s) => s.full_name));
+      expect(rest).toEqual(structured<Dossier>(without));
+      const section = [
+        '',
+        '',
+        '### Supervisors (6)',
+        ...supervisors.map(
+          (_, i) =>
+            `- **Roe, Richard ${i + 1}** — roles: supervisor (author recid ${3000001 + i} · BAI Richard.Roe.${i + 1})`,
+        ),
+      ].join('\n');
+      expect(bodyText(result)).toContain(section);
+      expect(bodyText(result).replace(section, '')).toBe(bodyText(without));
+      expect(textBlocks(result).slice(1)).toEqual(textBlocks(without).slice(1));
+    },
+  );
+
+  it('renders every supervisor, thesis, and publication value into content[]', async () => {
+    const result = await runRecord({
+      ...THESES.joint,
+      supervisors: [supervisorEntry(1, 'CERN'), { full_name: 'Unlinked, Sam' }],
+      publication_info: CONFERENCE_PAPERS.proceedings.publication_info,
+    });
+
+    const out = structured<Dossier>(result);
+    expect(out).toEqual(expect.schemaMatching(getPaperTool.output));
+    expect(out.supervisors).toHaveLength(2);
+    const text = bodyText(result);
+    for (const leaf of leaves(out)) expect(text).toContain(String(leaf));
+    expect(text).toContain('- **Unlinked, Sam**');
+    expect(text).toContain(
+      '- **Roe, Richard 1** — roles: supervisor (author recid 3000001 · BAI Richard.Roe.1) — CERN',
+    );
+  });
+
+  it('flattens line breaks in every new inline field while structuredContent keeps them', async () => {
+    let injected = 0;
+    const inj = (value: string) => {
+      injected += 1;
+      return `${value}\r\nINJECTED # heading`;
+    };
+    const result = await runRecord({
+      ...THESES.phd,
+      supervisors: [
+        {
+          full_name: inj('Roe, Richard'),
+          affiliations: [{ value: inj('CERN') }],
+          ids: [{ schema: 'INSPIRE BAI', value: inj('Richard.Roe.1') }],
+          inspire_roles: [inj('supervisor')],
+        },
+      ],
+      thesis_info: {
+        degree_type: inj('PhD'),
+        defense_date: inj('2024-10-25'),
+        date: inj('2024'),
+        institutions: [{ name: inj('Calcutta U.') }, { name: inj('# Forged heading') }],
+      },
+      publication_info: [{ cnum: inj('C22-07-06.1') }],
+    });
+
+    const out = structured<Dossier>(result);
+    expect(out.supervisors?.[0]?.name).toBe('Roe, Richard\r\nINJECTED # heading');
+    expect(out.thesis?.institutions[1]?.name).toBe('# Forged heading\r\nINJECTED # heading');
+    expect(out.publications[0]?.cnum).toBe('C22-07-06.1\r\nINJECTED # heading');
+    const text = bodyText(result);
+    expect(text).not.toMatch(/^INJECTED/m);
+    expect(text.match(/INJECTED/g)).toHaveLength(injected);
+    expect(text.split('\n').filter((line) => line.startsWith('#'))).toEqual([
+      '## (untitled)',
+      '### Publication',
+      '### Thesis',
+      '### Contributors (1 shown of 1)',
+      '### Supervisors (1)',
+      '### HEPData',
+      '### Follow-up queries',
+    ]);
+    expect(text).toContain('- \\# Forged heading INJECTED # heading');
   });
 });
 

@@ -21,11 +21,13 @@ import type {
   ExperimentRecord,
   HepdataAvailability,
   HepdataRecord,
+  InstitutionRecord,
   LiteratureHit,
   PaperAuthor,
   PaperDossier,
   PaperLookup,
   PaperPublication,
+  PaperThesis,
   RawAuthorMetadata,
   RawCitationBucketSet,
   RawCitationSummaryResponse,
@@ -35,10 +37,13 @@ import type {
   RawExperimentMetadata,
   RawHit,
   RawId,
+  RawInstitutionMetadata,
+  RawLiteratureAuthor,
   RawLiteratureMetadata,
   RawPublicationInfo,
   RawRef,
   RawSearchEnvelope,
+  RawThesisInfo,
   RawUrl,
   RawValue,
 } from './types.js';
@@ -267,9 +272,8 @@ export function toLiteratureHit(hit: RawHit<RawLiteratureMetadata>): LiteratureH
   };
 }
 
-function toPaperAuthor(
-  author: NonNullable<RawLiteratureMetadata['authors']>[number],
-): PaperAuthor[] {
+/** A contributor or thesis supervisor; unnamed entries are dropped. */
+function toPaperAuthor(author: RawLiteratureAuthor): PaperAuthor[] {
   const name = str(author.full_name);
   if (name === undefined) return [];
   return [
@@ -292,15 +296,44 @@ function toPublication(info: RawPublicationInfo): PaperPublication[] {
     ...opt('pages', pageRange(info)),
     ...opt('articleId', str(info.artid)),
     ...opt('freetext', str(info.pubinfo_freetext)),
+    ...opt('cnum', str(info.cnum)),
+    ...opt('conferenceRecid', recidFromRef(info.conference_record)),
+    ...opt('parentRecid', recidFromRef(info.parent_record)),
   };
   return Object.keys(publication).length === 0 ? [] : [publication];
+}
+
+/**
+ * Thesis details from `thesis_info`, or `undefined` when it holds nothing
+ * readable. INSPIRE can list one granting institution twice, unlinked and
+ * linked, so a name-only entry is dropped when its name exactly matches one that
+ * carries a recid; spelling variants and distinct institutions stay.
+ */
+function toThesis(info: RawThesisInfo | undefined): PaperThesis | undefined {
+  const named = (info?.institutions ?? []).flatMap((institution) => {
+    const name = str(institution.name);
+    return name === undefined ? [] : [{ name, ...opt('recid', recidFromRef(institution.record)) }];
+  });
+  const linked = new Set(named.flatMap((i) => (i.recid === undefined ? [] : [i.name])));
+  const institutions = named.filter((i) => i.recid !== undefined || !linked.has(i.name));
+  const degreeType = str(info?.degree_type);
+  const defenseDate = str(info?.defense_date);
+  const date = str(info?.date);
+  if (institutions.length === 0 && !degreeType && !defenseDate && !date) return;
+  return {
+    ...opt('degreeType', degreeType),
+    institutions,
+    ...opt('defenseDate', defenseDate),
+    ...opt('date', date),
+  };
 }
 
 /**
  * The `get_paper` dossier, its normalized author list paged from `authorOffset`
  * with at most `maxAuthors` entries; `resolution`
  * names the identifier form the paper input took and, after a merged recid's
- * redirect, the recid asked for.
+ * redirect, the recid asked for. Thesis supervisors are listed whole, outside
+ * the author paging: INSPIRE's search API keeps them out of `authors`.
  */
 export function toPaperLookup(
   m: RawLiteratureMetadata,
@@ -317,6 +350,7 @@ export function toPaperLookup(
   const authors = (m.authors ?? []).flatMap(toPaperAuthor);
   const page = authors.slice(authorOffset, authorOffset + maxAuthors);
   const nextOffset = authorOffset + page.length;
+  const supervisors = (m.supervisors ?? []).flatMap(toPaperAuthor);
   return {
     authorsInRecord: authors.length,
     paper: {
@@ -330,6 +364,7 @@ export function toPaperLookup(
       authorOffset,
       ...(page.length > 0 && nextOffset < authors.length ? { nextAuthorOffset: nextOffset } : {}),
       authors: page,
+      ...opt('supervisors', supervisors.length > 0 ? supervisors : undefined),
       documents: (m.documents ?? []).flatMap((document) => {
         const url = str(document.url);
         return document.hidden === true || url === undefined
@@ -353,6 +388,7 @@ export function toPaperLookup(
       ...opt('preprintDate', str(m.preprint_date)),
       ...opt('publicationDate', str(m.imprints?.[0]?.date)),
       publications: (m.publication_info ?? []).flatMap(toPublication),
+      ...opt('thesis', toThesis(m.thesis_info)),
       ...opt('arxivId', str(arxiv?.value)),
       arxivCategories: strings(arxiv?.categories),
       dois: unique(values(m.dois)),
@@ -604,6 +640,43 @@ export function toExperimentRecord(hit: RawHit<RawExperimentMetadata>): Experime
     nameVariants: strings(m.name_variants),
     ...opt('core', bool(m.core)),
     ...opt('literatureQuery', experimentLiteratureQuery(legacyName)),
+  };
+}
+
+// ─── Institutions ───────────────────────────────────────────────────────────
+
+/**
+ * An institution record. A hierarchy level with neither a name nor an acronym
+ * is dropped, and so is a related record whose `$ref` (`…/api/institutions/N`
+ * or `…/institutions/N`) carries no recid; cities and country codes are
+ * gathered across every address.
+ */
+export function toInstitutionRecord(hit: RawHit<RawInstitutionMetadata>): InstitutionRecord {
+  const m = hit.metadata ?? {};
+  const recid = recidOf(m.control_number, hit.id);
+  const addresses = m.addresses ?? [];
+  return {
+    recid,
+    ...opt('legacyIcn', str(m.legacy_ICN)),
+    hierarchy: (m.institution_hierarchy ?? []).flatMap((level) => {
+      const name = str(level.name);
+      const acronym = str(level.acronym);
+      return name === undefined && acronym === undefined
+        ? []
+        : [{ ...opt('name', name), ...opt('acronym', acronym) }];
+    }),
+    institutionTypes: strings(m.institution_type),
+    cities: unique(addresses.flatMap((address) => strings(address.cities))),
+    countryCodes: unique(strings(addresses.map((address) => address.country_code))),
+    ...opt('numberOfPapers', num(m.number_of_papers)),
+    relatedRecords: (m.related_records ?? []).flatMap((related) => {
+      const relatedRecid = recidFromRef(related.record);
+      return relatedRecid === undefined
+        ? []
+        : [{ recid: relatedRecid, ...opt('relation', str(related.relation)) }];
+    }),
+    ...opt('inactive', bool(m.inactive)),
+    literatureQuery: `affid:${recid}`,
   };
 }
 

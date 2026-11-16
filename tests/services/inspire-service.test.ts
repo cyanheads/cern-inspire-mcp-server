@@ -16,6 +16,7 @@ import type {
   CitationExportParams,
   CitationSummaryParams,
   LiteratureSearchParams,
+  RawInstitutionMetadata,
   RawLiteratureMetadata,
 } from '@/services/inspire/types.js';
 import { MARKUP_AS_TEXT, MARKUP_FREE, PUBLISHER_MARKUP } from '../fixtures/inspire-markup.js';
@@ -25,6 +26,7 @@ import {
   BIBTEX_ENTRIES,
   badRequestBody,
   CAPTURED_SERIES,
+  CONFERENCE_PAPERS,
   capturedResponse,
   citationSummaryBody,
   dataMetadata,
@@ -41,6 +43,9 @@ import {
   HIGGS_REFERENCE_TEXKEYS,
   hit,
   htmlResponse,
+  INSTITUTIONS,
+  institutionMetadata,
+  institutionPage,
   jsonResponse,
   LATEX_EU_ENTRIES,
   literatureMetadata,
@@ -54,6 +59,7 @@ import {
   rateLimitResponse,
   searchBody,
   sparseLiteratureMetadata,
+  THESES,
   TWO_RECORD_PAPERS,
   TWO_VERSION_DOIS,
   textResponse,
@@ -103,7 +109,7 @@ const LITERATURE_FIELDS =
   'control_number,titles.title,first_author.full_name,first_author.recid,author_count,collaborations.value,earliest_date,document_type,citation_count,citation_count_without_self_citations,arxiv_eprints,dois.value,publication_info,abstracts.value,abstracts.source';
 
 const DOSSIER_FIELDS =
-  'control_number,titles,abstracts,authors.full_name,authors.affiliations.value,authors.record,authors.ids,authors.inspire_roles,documents.url,documents.filename,documents.description,documents.material,documents.fulltext,documents.hidden,author_count,collaborations,accelerator_experiments,arxiv_eprints,dois,publication_info,report_numbers,keywords,inspire_categories,document_type,refereed,core,citeable,number_of_pages,earliest_date,preprint_date,imprints,citation_count,citation_count_without_self_citations,texkeys,urls,license';
+  'control_number,titles,abstracts,authors.full_name,authors.affiliations.value,authors.record,authors.ids,authors.inspire_roles,supervisors.full_name,supervisors.affiliations.value,supervisors.record,supervisors.ids,supervisors.inspire_roles,documents.url,documents.filename,documents.description,documents.material,documents.fulltext,documents.hidden,author_count,collaborations,accelerator_experiments,arxiv_eprints,dois,publication_info,thesis_info,report_numbers,keywords,inspire_categories,document_type,refereed,core,citeable,number_of_pages,earliest_date,preprint_date,imprints,citation_count,citation_count_without_self_citations,texkeys,urls,license';
 
 /** The resolve step asks for the recid and the identifiers it checks the hit against. */
 const RESOLVE_FIELDS = 'control_number,dois.value,arxiv_eprints.value';
@@ -571,6 +577,54 @@ describe('getPaper', () => {
     expect(data?.params.get('q')).toBe(`literature.control_number:${HIGGS.recid}`);
     expect(data?.params.get('fields')).toBe('control_number,dois.value,dois.material');
     expect(data?.params.get('size')).toBe('10');
+  });
+
+  it('selects authors and supervisors through the same projections, never a whole contributor object', async () => {
+    routeRecord();
+    routeData();
+
+    await h.service.getPaper(HIGGS.recid, 25, h.call());
+
+    const fields =
+      h.requests
+        .find((r) => r.path === '/api/literature')
+        ?.params.get('fields')
+        ?.split(',') ?? [];
+    const projections = (list: string) =>
+      fields.filter((f) => f === list || f.startsWith(`${list}.`)).map((f) => f.slice(list.length));
+    expect(projections('supervisors')).toEqual(projections('authors'));
+    expect(projections('supervisors')).toEqual([
+      '.full_name',
+      '.affiliations.value',
+      '.record',
+      '.ids',
+      '.inspire_roles',
+    ]);
+    expect(fields).toContain('thesis_info');
+    expect(fields).toContain('publication_info');
+  });
+
+  it('carries supervisors, thesis details, and conference links from the record read', async () => {
+    routeRecord({ ...THESES.master, publication_info: CONFERENCE_PAPERS.icm.publication_info });
+    routeData(emptyBody());
+
+    const lookup = await h.service.getPaper(String(THESES.master.control_number), 0, h.call());
+
+    expect(lookup).toMatchObject({
+      authorsInRecord: 1,
+      paper: {
+        authors: [],
+        authorCount: 1,
+        supervisors: [
+          { name: 'Roe, Richard 2', recid: '3000002', affiliations: ['Minas Gerais U.'] },
+        ],
+        thesis: {
+          degreeType: 'Master',
+          institutions: [{ name: 'Minas Gerais U.', recid: '908193' }],
+        },
+        publications: [{ year: 2023 }, { cnum: 'C22-07-06.1', conferenceRecid: '1915801' }],
+      },
+    });
   });
 
   it('resolves an arXiv ID first, then reads the record and availability', async () => {
@@ -1391,6 +1445,9 @@ describe('exportCitations past page 1', () => {
 });
 
 describe('searchAuthors', () => {
+  const search = (query: string, page = 1, size = 5) =>
+    h.service.searchAuthors({ query, page, size }, h.call());
+
   it.each([
     ['Doe, Jane', 'name', 'Doe, Jane'],
     ['Jane.Doe.1', 'bai', 'ids.value:Jane.Doe.1'],
@@ -1400,7 +1457,7 @@ describe('searchAuthors', () => {
   ])('routes %j as %s with q=%s', async (query, matchedAs, q) => {
     h.route('/authors', jsonResponse(authorPage()));
 
-    const page = await h.service.searchAuthors(query, 5, h.call());
+    const page = await search(query);
 
     expect(page.matchedAs).toBe(matchedAs);
     expect(h.requests[0]?.path).toBe('/api/authors');
@@ -1408,21 +1465,55 @@ describe('searchAuthors', () => {
     expect(h.requests[0]?.params.get('size')).toBe('5');
   });
 
-  it('sends the fixed author fields, never email_addresses', async () => {
+  it('sends the fixed author fields, never email_addresses, with the page and its size', async () => {
     h.route('/authors', jsonResponse(authorPage()));
 
-    await h.service.searchAuthors('Jane.Doe.1', 5, h.call());
+    await search('Jane.Doe.1', 3, 25);
 
     expect(h.requests[0]?.params.get('fields')).toBe(
       'control_number,name,ids,positions,arxiv_categories,advisors,urls,awards,status,stub,deleted',
     );
-    expect(sortedNames()).toEqual(['fields', 'q', 'size']);
+    expect(sortedNames()).toEqual(['fields', 'page', 'q', 'size']);
+    expect(h.requests[0]?.params.get('page')).toBe('3');
+    expect(h.requests[0]?.params.get('size')).toBe('25');
+  });
+
+  it.each([true, false])('reads hasMore from links.next (%s), not the total', async (next) => {
+    h.route('/authors', jsonResponse(authorPage([authorMetadata()], { next, total: 80_843 })));
+
+    const page = await search('Zhang, Wei', 2, 1);
+
+    expect(page.hasMore).toBe(next);
+    expect(page.total).toBe(80_843);
+  });
+
+  it('keeps hasMore on a raw page whose every hit is a deleted profile', async () => {
+    h.route(
+      '/authors',
+      jsonResponse(
+        authorPage(
+          [
+            authorMetadata({ control_number: 1, deleted: true }),
+            authorMetadata({ control_number: 2, deleted: true }),
+          ],
+          { next: true, total: 90 },
+        ),
+      ),
+    );
+
+    await expect(search('Doe', 4, 2)).resolves.toEqual({
+      matchedAs: 'name',
+      total: 90,
+      hasMore: true,
+      authors: [],
+      deletedDropped: 2,
+    });
   });
 
   it('maps a profile: ids by schema, positions split by current, advisors, literature query', async () => {
     h.route('/authors', jsonResponse(authorPage()));
 
-    const [author] = (await h.service.searchAuthors('Jane.Doe.1', 5, h.call())).authors;
+    const [author] = (await search('Jane.Doe.1')).authors;
 
     expect(author).toEqual({
       recid: '1000001',
@@ -1460,7 +1551,7 @@ describe('searchAuthors', () => {
       ),
     );
 
-    const page = await h.service.searchAuthors('Doe', 5, h.call());
+    const page = await search('Doe');
 
     expect(page.authors.map((a) => a.recid)).toEqual(['1', '3']);
     expect(page.deletedDropped).toBe(1);
@@ -1471,7 +1562,7 @@ describe('searchAuthors', () => {
     const leaky = { ...authorMetadata(), email_addresses: [{ value: 'jane.doe@example.org' }] };
     h.route('/authors', jsonResponse(authorPage([leaky])));
 
-    const page = await h.service.searchAuthors('Jane.Doe.1', 5, h.call());
+    const page = await search('Jane.Doe.1');
 
     expect(JSON.stringify(page)).not.toContain('example.org');
   });
@@ -1479,9 +1570,10 @@ describe('searchAuthors', () => {
   it('returns an empty page for zero hits', async () => {
     h.route('/authors', jsonResponse(emptyBody()));
 
-    await expect(h.service.searchAuthors('Nobody, Noone', 5, h.call())).resolves.toEqual({
+    await expect(search('Nobody, Noone')).resolves.toEqual({
       matchedAs: 'name',
       total: 0,
+      hasMore: false,
       authors: [],
       deletedDropped: 0,
     });
@@ -1493,7 +1585,7 @@ describe('searchAuthors', () => {
       jsonResponse(authorPage([{ control_number: 9, name: { value: 'Roe, Richard' } }])),
     );
 
-    const [author] = (await h.service.searchAuthors('Roe', 5, h.call())).authors;
+    const [author] = (await search('Roe')).authors;
 
     expect(author).toMatchObject({
       recid: '9',
@@ -2294,22 +2386,38 @@ describe('searchExperiments', () => {
   const EXPERIMENT_FIELDS =
     'control_number,legacy_name,experiment,long_name,accelerator,institutions,collaboration,inspire_classification,project_type,date_proposed,date_approved,date_started,date_completed,number_of_papers,description,urls,name_variants,core';
 
-  it('sends free text for a name and the fixed fields list', async () => {
+  const search = (query: string, page = 1, size = 5) =>
+    h.service.searchExperiments({ query, page, size }, h.call());
+
+  it('sends free text for a name, the fixed fields list, and the page with its size', async () => {
     h.route('/experiments', jsonResponse(experimentPage()));
 
-    await h.service.searchExperiments('CERN-LHC-ATLAS', 5, h.call());
+    await search('CERN-LHC-ATLAS', 14, 25);
 
     expect(h.requests[0]?.path).toBe('/api/experiments');
     expect(h.requests[0]?.params.get('q')).toBe('CERN-LHC-ATLAS');
-    expect(h.requests[0]?.params.get('size')).toBe('5');
+    expect(h.requests[0]?.params.get('page')).toBe('14');
+    expect(h.requests[0]?.params.get('size')).toBe('25');
     expect(h.requests[0]?.params.get('fields')).toBe(EXPERIMENT_FIELDS);
-    expect(sortedNames()).toEqual(['fields', 'q', 'size']);
+    expect(sortedNames()).toEqual(['fields', 'page', 'q', 'size']);
+  });
+
+  it.each([true, false])('reads hasMore from links.next (%s), not the total', async (next) => {
+    h.route(
+      '/experiments',
+      jsonResponse(experimentPage([experimentMetadata()], { next, total: 333 })),
+    );
+
+    const page = await search('neutrino', 2, 1);
+
+    expect(page.hasMore).toBe(next);
+    expect(page.total).toBe(333);
   });
 
   it('routes a digits-only query to control_number', async () => {
     h.route('/experiments', jsonResponse(experimentPage()));
 
-    await h.service.searchExperiments('1108541', 5, h.call());
+    await search('1108541');
 
     expect(h.requests[0]?.params.get('q')).toBe('control_number:1108541');
   });
@@ -2317,7 +2425,7 @@ describe('searchExperiments', () => {
   it.each(['12345678901', ' 123', '12a', 'ATLAS 2012'])('sends %j as free text', async (query) => {
     h.route('/experiments', jsonResponse(experimentPage()));
 
-    await h.service.searchExperiments(query, 5, h.call());
+    await search(query);
 
     expect(h.requests[0]?.params.get('q')).toBe(query);
   });
@@ -2325,7 +2433,7 @@ describe('searchExperiments', () => {
   it('maps an ongoing experiment: sentinel date_completed becomes ongoing, not a date', async () => {
     h.route('/experiments', jsonResponse(experimentPage([experimentMetadata()], { total: 4 })));
 
-    const page = await h.service.searchExperiments('ATLAS', 5, h.call());
+    const page = await search('ATLAS');
 
     expect(page.total).toBe(4);
     expect(page.experiments[0]).toEqual({
@@ -2355,7 +2463,7 @@ describe('searchExperiments', () => {
       jsonResponse(experimentPage([experimentMetadata({ date_completed: '2013' })])),
     );
 
-    const [experiment] = (await h.service.searchExperiments('ATLAS', 5, h.call())).experiments;
+    const [experiment] = (await search('ATLAS')).experiments;
 
     expect(experiment).toMatchObject({ ongoing: false, dateCompleted: '2013' });
   });
@@ -2371,7 +2479,7 @@ describe('searchExperiments', () => {
       ),
     );
 
-    const { experiments } = await h.service.searchExperiments('DUNE', 5, h.call());
+    const { experiments } = await search('DUNE');
 
     expect(experiments).toHaveLength(2);
     for (const experiment of experiments) {
@@ -2386,7 +2494,7 @@ describe('searchExperiments', () => {
       jsonResponse(experimentPage([{ control_number: 7, legacy_name: 'FNAL-E-0001' }])),
     );
 
-    const [experiment] = (await h.service.searchExperiments('E-0001', 5, h.call())).experiments;
+    const [experiment] = (await search('E-0001')).experiments;
 
     expect(experiment).toEqual({
       recid: '7',
@@ -2403,9 +2511,300 @@ describe('searchExperiments', () => {
   it('returns an empty page for zero hits', async () => {
     h.route('/experiments', jsonResponse(emptyBody()));
 
-    await expect(h.service.searchExperiments('nothing', 5, h.call())).resolves.toEqual({
+    await expect(search('nothing')).resolves.toEqual({
       total: 0,
+      hasMore: false,
       experiments: [],
+    });
+  });
+});
+
+describe('searchInstitutions', () => {
+  const INSTITUTION_FIELDS =
+    'control_number,legacy_ICN,institution_hierarchy,institution_type,addresses.cities,addresses.country_code,number_of_papers,related_records.record,related_records.relation,inactive';
+
+  const search = (query: string, page = 1, size = 25) =>
+    h.service.searchInstitutions({ query, page, size }, h.call());
+
+  /** The records a page of `metadata` normalizes to. */
+  const read = async (...metadata: RawInstitutionMetadata[]) => {
+    h.route('/institutions', jsonResponse(institutionPage(metadata)));
+    return (await search('x')).institutions;
+  };
+
+  const UW_PHYSICS = {
+    recid: '903338',
+    legacyIcn: 'Washington U., Seattle',
+    hierarchy: [{ name: 'Department of physics' }, { name: 'University of Washington' }],
+    institutionTypes: ['University'],
+    cities: ['Seattle'],
+    countryCodes: ['US'],
+    numberOfPapers: 10812,
+    relatedRecords: [{ recid: '945165', relation: 'parent' }],
+    literatureQuery: 'affid:903338',
+  };
+
+  it('sends free text for a name, the fixed fields list, and the page with its size', async () => {
+    h.route('/institutions', jsonResponse(institutionPage()));
+
+    await search('University of Washington', 2, 25);
+
+    expect(h.requests[0]?.path).toBe('/api/institutions');
+    expect(h.requests[0]?.params.get('q')).toBe('University of Washington');
+    expect(h.requests[0]?.params.get('page')).toBe('2');
+    expect(h.requests[0]?.params.get('size')).toBe('25');
+    expect(h.requests[0]?.params.get('fields')).toBe(INSTITUTION_FIELDS);
+    expect(sortedNames()).toEqual(['fields', 'page', 'q', 'size']);
+  });
+
+  it.each([
+    ['903338', 'q=control_number%3A903338'],
+    ['987654321', 'q=control_number%3A987654321'],
+    ['7', 'q=control_number%3A7'],
+  ])('sends the digits-only query %s as a control_number clause (%s)', async (query, encoded) => {
+    h.route('/institutions', jsonResponse(emptyBody()));
+
+    await search(query);
+
+    expect(h.requests[0]?.params.get('q')).toBe(`control_number:${query}`);
+    expect(h.requests[0]?.url.search).toContain(encoded);
+  });
+
+  it.each([
+    ['legacy_ICN:"Tokyo U."', 'q=legacy_ICN%3A%22Tokyo+U.%22'],
+    ['legacy_ICN:"tokyo u."', 'q=legacy_ICN%3A%22tokyo+u.%22'],
+  ])(
+    'sends the exact-name form %s as written, quotes and case kept (%s)',
+    async (query, encoded) => {
+      h.route('/institutions', jsonResponse(emptyBody()));
+
+      await search(query);
+
+      expect(h.requests[0]?.params.get('q')).toBe(query);
+      expect(h.requests[0]?.url.search).toContain(encoded);
+    },
+  );
+
+  it.each(['1234567890', ' 123', '12a', 'University of Washington'])(
+    'sends %j as free text',
+    async (query) => {
+      h.route('/institutions', jsonResponse(emptyBody()));
+
+      await search(query);
+
+      expect(h.requests[0]?.params.get('q')).toBe(query);
+    },
+  );
+
+  it.each([true, false])('reads hasMore from links.next (%s), not the total', async (next) => {
+    h.route(
+      '/institutions',
+      jsonResponse(institutionPage([institutionMetadata()], { next, total: 27 })),
+    );
+
+    const page = await search('University of Washington', 2, 1);
+
+    expect(page.hasMore).toBe(next);
+    expect(page.total).toBe(27);
+  });
+
+  it('maps a department record: recorded name, two-level hierarchy, location, paper count, parent, and its affid query', async () => {
+    const [record] = await read(INSTITUTIONS.uwPhysics);
+
+    expect(record).toEqual(UW_PHYSICS);
+    expect(record).not.toHaveProperty('inactive');
+  });
+
+  it('maps a main record with a one-level hierarchy and no related records', async () => {
+    const [record] = await read(INSTITUTIONS.uwMain);
+
+    expect(record).toEqual({
+      recid: '945165',
+      legacyIcn: 'U. Washington, Seattle (main)',
+      hierarchy: [{ name: 'University of Washington' }],
+      institutionTypes: ['University'],
+      cities: ['Seattle'],
+      countryCodes: ['US'],
+      numberOfPapers: 413,
+      relatedRecords: [],
+      literatureQuery: 'affid:945165',
+    });
+  });
+
+  it('keeps the records in the order INSPIRE sent them, not by paper count', async () => {
+    const records = await read(INSTITUTIONS.uwMain, INSTITUTIONS.zeuthen, INSTITUTIONS.uwPhysics);
+
+    expect(records.map((r) => r.recid)).toEqual(['945165', '2180671', '903338']);
+  });
+
+  it('keeps an acronym beside its name and an acronym-only level, most specific first, three levels deep', async () => {
+    const [cenpa, group] = await read(
+      INSTITUTIONS.cenpa,
+      institutionMetadata({
+        institution_hierarchy: [
+          { acronym: 'NTG' },
+          { name: 'Department of physics', acronym: 'PHYS' },
+          { name: 'University of Washington', acronym: 'UW' },
+        ],
+      }),
+    );
+
+    expect(cenpa?.hierarchy).toEqual([
+      { name: 'Center for Experimental Nuclear Physics and Astrophysics', acronym: 'CENPA' },
+      { name: 'University of Washington' },
+    ]);
+    expect(group?.hierarchy).toEqual([
+      { acronym: 'NTG' },
+      { name: 'Department of physics', acronym: 'PHYS' },
+      { name: 'University of Washington', acronym: 'UW' },
+    ]);
+  });
+
+  it('drops a hierarchy level with neither a name nor an acronym, blank strings included', async () => {
+    const [record] = await read(
+      institutionMetadata({
+        institution_hierarchy: [
+          {},
+          { name: '  ' },
+          { name: 'Department of physics', acronym: '' },
+          { acronym: ' ' },
+          { name: 'University of Washington' },
+        ],
+      }),
+    );
+
+    expect(record?.hierarchy).toEqual([
+      { name: 'Department of physics' },
+      { name: 'University of Washington' },
+    ]);
+  });
+
+  it('reads every related record of an inactive institution, the /institutions/N form included, in record order', async () => {
+    const [record] = await read(INSTITUTIONS.zeuthen);
+
+    expect(record).toEqual({
+      recid: '2180671',
+      legacyIcn: 'IfH, Zeuthen',
+      hierarchy: [],
+      institutionTypes: ['Research Center'],
+      cities: ['Zeuthen'],
+      countryCodes: ['DD'],
+      numberOfPapers: 14,
+      relatedRecords: [
+        { recid: '3094652', relation: 'parent' },
+        { recid: '3094653', relation: 'parent' },
+        { recid: '3095957', relation: 'predecessor' },
+        { recid: '902666', relation: 'successor' },
+      ],
+      inactive: true,
+      literatureQuery: 'affid:2180671',
+    });
+  });
+
+  it.each([
+    ['an /api/institutions/N reference', 'https://inspirehep.net/api/institutions/945165'],
+    ['an /institutions/N reference', 'https://inspirehep.net/institutions/945165'],
+    ['a reference with a trailing slash', 'https://inspirehep.net/api/institutions/945165/'],
+  ])('reads the related recid of %s', async (_label, $ref) => {
+    const [record] = await read(
+      institutionMetadata({ related_records: [{ record: { $ref }, relation: 'parent' }] }),
+    );
+
+    expect(record?.relatedRecords).toEqual([{ recid: '945165', relation: 'parent' }]);
+  });
+
+  it('keeps the recid of a related record with only a free-text relation, without a relation', async () => {
+    const related = [
+      {
+        record: { $ref: 'https://inspirehep.net/api/institutions/911469' },
+        relation_freetext: 'Merged with',
+      },
+      { record: { $ref: 'https://inspirehep.net/institutions/902666' }, relation: '' },
+      { record: { $ref: 'https://inspirehep.net/institutions/902667' }, relation: 'successor' },
+    ] as NonNullable<RawInstitutionMetadata['related_records']>;
+
+    const [record] = await read(institutionMetadata({ related_records: related }));
+
+    expect(record?.relatedRecords).toEqual([
+      { recid: '911469' },
+      { recid: '902666' },
+      { recid: '902667', relation: 'successor' },
+    ]);
+  });
+
+  it('drops a related record whose reference carries no recid', async () => {
+    const [record] = await read(
+      institutionMetadata({
+        related_records: [
+          { relation: 'parent' },
+          { record: {}, relation: 'parent' },
+          {
+            record: { $ref: 'https://inspirehep.net/api/institutions/abc' },
+            relation: 'successor',
+          },
+          {
+            record: { $ref: 'https://inspirehep.net/api/institutions/945165' },
+            relation: 'parent',
+          },
+        ],
+      }),
+    );
+
+    expect(record?.relatedRecords).toEqual([{ recid: '945165', relation: 'parent' }]);
+  });
+
+  it('gathers cities and country codes across every address, primary first, repeats dropped', async () => {
+    const [record] = await read(
+      institutionMetadata({
+        addresses: [
+          { cities: ['Batavia', 'Chicago'], country_code: 'US' },
+          { cities: ['Geneva'], country_code: 'CH' },
+          { cities: ['Chicago'], country_code: 'US' },
+          { country_code: 'FR' },
+          { cities: ['Meyrin', ''] },
+        ],
+      }),
+    );
+
+    expect(record?.cities).toEqual(['Batavia', 'Chicago', 'Geneva', 'Meyrin']);
+    expect(record?.countryCodes).toEqual(['US', 'CH', 'FR']);
+  });
+
+  it('reads a sparse record with only a recid: absent fields stay absent, lists stay empty', async () => {
+    const [record] = await read({ control_number: 1 });
+
+    expect(record).toEqual({
+      recid: '1',
+      hierarchy: [],
+      institutionTypes: [],
+      cities: [],
+      countryCodes: [],
+      relatedRecords: [],
+      literatureQuery: 'affid:1',
+    });
+  });
+
+  it('reads the recid from the hit id when the record carries no control_number', async () => {
+    h.route('/institutions', jsonResponse(searchBody([hit({ legacy_ICN: 'Tokyo U.' }, '903273')])));
+
+    const [record] = (await search('x')).institutions;
+
+    expect(record).toMatchObject({ recid: '903273', literatureQuery: 'affid:903273' });
+  });
+
+  it('keeps inactive false and a paper count of zero rather than dropping them', async () => {
+    const [record] = await read(institutionMetadata({ inactive: false, number_of_papers: 0 }));
+
+    expect(record).toMatchObject({ inactive: false, numberOfPapers: 0 });
+  });
+
+  it('returns an empty page for zero hits', async () => {
+    h.route('/institutions', jsonResponse(emptyBody()));
+
+    await expect(search('legacy_ICN:"tokyo u."')).resolves.toEqual({
+      total: 0,
+      hasMore: false,
+      institutions: [],
     });
   });
 });
@@ -2806,7 +3205,9 @@ describe('recids read from upstream', () => {
   it.each(UNREADABLE)('fails an author page whose profile has %s', async (_label, fields, id) => {
     h.route('/authors', jsonResponse(searchBody([rawHit(authorMetadata(), fields, id)])));
 
-    await expectUnreadable(h.service.searchAuthors('Doe, Jane', 5, h.call()));
+    await expectUnreadable(
+      h.service.searchAuthors({ query: 'Doe, Jane', page: 1, size: 5 }, h.call()),
+    );
   });
 
   it.each(UNREADABLE)(
@@ -2814,7 +3215,23 @@ describe('recids read from upstream', () => {
     async (_label, fields, id) => {
       h.route('/experiments', jsonResponse(searchBody([rawHit(experimentMetadata(), fields, id)])));
 
-      await expectUnreadable(h.service.searchExperiments('ATLAS', 5, h.call()));
+      await expectUnreadable(
+        h.service.searchExperiments({ query: 'ATLAS', page: 1, size: 5 }, h.call()),
+      );
+    },
+  );
+
+  it.each(UNREADABLE)(
+    'fails an institution page whose record has %s',
+    async (_label, fields, id) => {
+      h.route(
+        '/institutions',
+        jsonResponse(searchBody([rawHit(institutionMetadata(), fields, id)])),
+      );
+
+      await expectUnreadable(
+        h.service.searchInstitutions({ query: 'Tokyo', page: 1, size: 25 }, h.call()),
+      );
     },
   );
 
@@ -2911,7 +3328,8 @@ describe('experiment literatureQuery', () => {
         ? omit(experimentMetadata(), 'legacy_name')
         : experimentMetadata({ legacy_name: legacyName });
     h.route('/experiments', jsonResponse(experimentPage([metadata])));
-    const [record] = (await h.service.searchExperiments('x', 5, h.call())).experiments;
+    const [record] = (await h.service.searchExperiments({ query: 'x', page: 1, size: 5 }, h.call()))
+      .experiments;
     return record;
   };
 

@@ -1,14 +1,20 @@
 /**
- * @fileoverview cern_inspire_search_experiments — INSPIRE-HEP experiment,
- * collaboration, and facility records by name or legacy name: accelerator, host
- * institutions, lifecycle dates, paper count, and the literature query that
- * selects each experiment's papers.
+ * @fileoverview cern_inspire_search_experiments — one page of INSPIRE-HEP
+ * experiment, collaboration, and facility records by name or legacy name:
+ * accelerator, host institutions, lifecycle dates, paper count, and the
+ * literature query that selects each experiment's papers.
  * @module mcp-server/tools/definitions/search-experiments.tool
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { blankAsUnset } from '@/mcp-server/tools/inputs.js';
+import {
+  blankAsUnset,
+  moreResultsNotice,
+  pastLastPageNotice,
+  RESULT_WINDOW,
+} from '@/mcp-server/tools/inputs.js';
+import { isRecid } from '@/services/inspire/identifiers.js';
 import { getInspireService } from '@/services/inspire/inspire-service.js';
 import { atLineStart, callerEcho, inline, printUrl, quote } from '@/utils/render.js';
 
@@ -71,7 +77,7 @@ const experimentSchema = z
       .number()
       .optional()
       .describe(
-        "INSPIRE's stored paper count; it can trail the number of records literatureQuery matches.",
+        "INSPIRE's stored paper count; it can differ from the number of records literatureQuery matches.",
       ),
     description: z.string().optional().describe('Description as INSPIRE records it.'),
     urls: z
@@ -169,7 +175,7 @@ function renderExperiment(e: ExperimentOutput, position: number): string[] {
 export const searchExperimentsTool = tool('cern_inspire_search_experiments', {
   title: 'Search INSPIRE experiments',
   description:
-    "Find experiments, collaborations, and facilities in INSPIRE-HEP (ATLAS, CMS, DUNE, Belle II, …) by name, accelerator, or INSPIRE legacy name (CERN-LHC-CMS); digits alone look up an experiment recid. Each record carries the accelerator, host institutions, collaboration and subgroups, classification, lifecycle dates (proposed, approved, started, completed, ongoing), INSPIRE's paper count, a description, and a literatureQuery to pass to cern_inspire_search_literature or cern_inspire_get_citation_summary for the experiment's papers.",
+    "Find experiments, collaborations, and facilities in INSPIRE-HEP (ATLAS, CMS, DUNE, Belle II, …) by name, accelerator, or INSPIRE legacy name (CERN-LHC-CMS); digits alone look up an experiment recid. Each record carries the accelerator, host institutions, collaboration and subgroups, classification, lifecycle dates (proposed, approved, started, completed, ongoing), INSPIRE's paper count, a description, and a literatureQuery to pass to cern_inspire_search_literature or cern_inspire_get_citation_summary for the experiment's papers. Returns one page of records; request the next with page and the same limit. Only the first 10,000 results of a query are reachable.",
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     query: z
@@ -180,23 +186,46 @@ export const searchExperimentsTool = tool('cern_inspire_search_experiments', {
       .describe(
         'Experiment, collaboration, accelerator, or facility name (ATLAS, LHCb, Tevatron), an INSPIRE legacy name (CERN-LHC-CMS), or an experiment recid (digits only).',
       ),
+    page: blankAsUnset(z.number().int().min(1).default(1)).describe(
+      'Page number, starting at 1. page × effective limit (after clamping) may not exceed 10,000.',
+    ),
     limit: blankAsUnset(z.number().int().min(1).default(5)).describe(
-      'Experiments to return (positive integer, default 5; above 25 uses 25).',
+      'Experiments per page (positive integer, default 5; above 25 uses 25).',
     ),
   }),
   output: z.object({
     experiments: z
       .array(experimentSchema)
-      .describe('Matching experiment records, in INSPIRE relevance order.'),
+      .describe('The experiment records on this page, in INSPIRE relevance order.'),
+    page: z.number().describe('The page returned.'),
+    limit: z.number().describe('The effective limit after clamping: experiments per page.'),
+    hasMore: z.boolean().describe('True when INSPIRE has a further page of results.'),
   }),
   enrichment: {
     totalCount: z.number().describe('Total experiment records the query matched.'),
-    truncated: z.boolean().describe('True when more records matched than were returned.'),
-    shown: z.number().describe('Number of records returned.'),
+    truncated: z.boolean().describe('True when more results exist beyond this page.'),
+    shown: z.number().describe('Number of records on this page.'),
     cap: z.number().describe('The limit applied.'),
-    notice: z.string().optional().describe('Guidance on an empty or capped result.'),
+    nextPage: z
+      .number()
+      .optional()
+      .describe(
+        'The page number to request next, with the same limit, when one exists within the 10,000-result window.',
+      ),
+    notice: z.string().optional().describe('Guidance on an empty or paged result.'),
+  },
+  enrichmentTrailer: {
+    nextPage: { label: 'Next page' },
   },
   errors: [
+    {
+      reason: 'beyond_result_window',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'page × effective limit (after clamping) exceeds the 10,000 results INSPIRE serves for one query.',
+      recovery:
+        'Narrow the query with a more specific name, legacy name, or accelerator until it matches under 10,000 records, then page again with cern_inspire_search_experiments.',
+      severity: 'notice',
+    },
     {
       reason: 'invalid_query',
       code: JsonRpcErrorCode.ValidationError,
@@ -229,7 +258,7 @@ export const searchExperimentsTool = tool('cern_inspire_search_experiments', {
       code: JsonRpcErrorCode.ServiceUnavailable,
       when: 'The INSPIRE body exceeded the byte ceiling, was HTML where JSON was expected, or was invalid JSON.',
       recovery:
-        'Retry this call in a few seconds; if it fails again, retry cern_inspire_search_experiments with a smaller limit.',
+        'Retry this call in a few seconds; if it fails again, INSPIRE is likely serving an error page, so wait a minute before retrying cern_inspire_search_experiments with the same page and limit.',
       thrownBy: 'service',
     },
   ],
@@ -243,42 +272,65 @@ export const searchExperimentsTool = tool('cern_inspire_search_experiments', {
     ctx.enrich({ truncated: false, shown: 0, cap: input.limit });
     ctx.enrich.total(0);
 
+    if (input.page * input.limit > RESULT_WINDOW) {
+      throw ctx.fail(
+        'beyond_result_window',
+        `page ${input.page} × limit ${input.limit} reaches past the first 10,000 results, which is all INSPIRE serves for one query.`,
+        { page: input.page, limit: input.limit },
+      );
+    }
+
     const inspire = getInspireService();
     const result = await inspire.searchExperiments(
-      input.query,
-      input.limit,
+      { query: input.query, page: input.page, size: input.limit },
       inspire.beginCall(ctx),
     );
     const shown = result.experiments.length;
     ctx.enrich({ shown });
     ctx.enrich.total(result.total);
-    ctx.log.info('Experiment search completed', { total: result.total, shown });
+    ctx.log.info('Experiment search completed', { total: result.total, shown, page: input.page });
 
     const notices: string[] = reduction ? [reduction] : [];
     if (shown === 0) {
       notices.push(
-        `No INSPIRE experiment matched "${callerEcho(input.query)}". Try the collaboration's common name or the accelerator (LHC, Tevatron), or search papers with cern_inspire_search_literature using "collaboration:NAME".`,
-      );
-    } else if (result.total > shown) {
-      notices.push(
-        input.limit < MAX_LIMIT
-          ? `More experiments matched; raise limit (max ${MAX_LIMIT}) or use a more specific name or legacy name.`
-          : 'More experiments matched than the 25 returned; use a more specific name or legacy name.',
+        result.total > 0
+          ? pastLastPageNotice(input.page, result.total, input.limit)
+          : isRecid(input.query)
+            ? `No INSPIRE experiment record has recid ${input.query}; search by experiment, collaboration, or accelerator name instead.`
+            : `No INSPIRE experiment matched "${callerEcho(input.query)}". Try the collaboration's common name or the accelerator (LHC, Tevatron), or search papers with cern_inspire_search_literature using "collaboration:NAME".`,
       );
     }
-    if (shown > 0 && result.total > shown) {
+
+    if (result.hasMore) {
+      const nextPage = input.page + 1;
+      const reachable = nextPage * input.limit <= RESULT_WINDOW;
+      if (reachable) ctx.enrich({ nextPage });
+      notices.unshift(
+        reachable
+          ? moreResultsNotice(nextPage, 'limit', input.limit)
+          : 'INSPIRE serves only the first 10,000 results of a query; narrow it with a more specific name, legacy name, or accelerator to reach the rest.',
+      );
       ctx.enrich.truncated({ shown, cap: input.limit, guidance: notices.join(' ') });
     } else if (notices.length > 0) {
       ctx.enrich.notice(notices.join(' '));
     }
 
-    return { experiments: result.experiments };
+    return {
+      experiments: result.experiments,
+      page: input.page,
+      limit: input.limit,
+      hasMore: result.hasMore,
+    };
   },
 
   format: (result) => {
-    const lines = [`## INSPIRE experiments (${result.experiments.length})`];
+    const lines = [
+      `## INSPIRE experiments, page ${result.page}`,
+      `**Page:** ${result.page} · **Limit:** ${result.limit} · **Experiments on this page:** ${result.experiments.length} · **More pages:** ${result.hasMore ? 'yes' : 'no'}`,
+    ];
+    const offset = (result.page - 1) * result.limit;
     result.experiments.forEach((experiment, i) => {
-      lines.push('', ...renderExperiment(experiment, i + 1));
+      lines.push('', ...renderExperiment(experiment, offset + i + 1));
     });
     return [{ type: 'text', text: lines.join('\n') }];
   },

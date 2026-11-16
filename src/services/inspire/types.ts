@@ -42,20 +42,33 @@ export interface RawUrl {
 
 export interface RawPublicationInfo {
   artid?: string;
+  /** Conference number (`C22-07-06.1`) of the conference the contribution belongs to. */
+  cnum?: string;
+  conference_record?: RawRef;
   journal_title?: string;
   journal_volume?: string;
   page_end?: string;
   page_start?: string;
+  /** The record the contribution appears in: a proceedings volume or a book. */
+  parent_record?: RawRef;
   pubinfo_freetext?: string;
   year?: number;
 }
 
+/** A contributor in `authors`, or a thesis supervisor in `supervisors` (the same shape). */
 export interface RawLiteratureAuthor {
   affiliations?: RawValue[];
   full_name?: string;
   ids?: RawId[];
   inspire_roles?: string[];
   record?: RawRef;
+}
+
+export interface RawThesisInfo {
+  date?: string;
+  defense_date?: string;
+  degree_type?: string;
+  institutions?: { name?: string; record?: RawRef }[];
 }
 
 export interface RawLiteratureMetadata {
@@ -91,7 +104,10 @@ export interface RawLiteratureMetadata {
   publication_info?: RawPublicationInfo[];
   refereed?: boolean;
   report_numbers?: RawValue[];
+  /** Thesis supervisors: INSPIRE's search API lists them here, never in `authors`. */
+  supervisors?: RawLiteratureAuthor[];
   texkeys?: string[];
+  thesis_info?: RawThesisInfo;
   titles?: { title?: string }[];
   urls?: RawUrl[];
 }
@@ -136,6 +152,21 @@ export interface RawExperimentMetadata {
   number_of_papers?: number;
   project_type?: string[];
   urls?: RawUrl[];
+}
+
+/** An institution record as the search selects it (`INSTITUTION_FIELDS`). */
+export interface RawInstitutionMetadata {
+  /** The primary address first, then secondary ones (several campuses). */
+  addresses?: { cities?: string[]; country_code?: string }[];
+  control_number?: number;
+  inactive?: boolean;
+  /** The record's own unit first, then each parent, least specific last. */
+  institution_hierarchy?: { acronym?: string; name?: string }[];
+  institution_type?: string[];
+  legacy_ICN?: string;
+  number_of_papers?: number;
+  /** `relation` is `parent`, `successor`, or `predecessor` for an institution; a free-text relation is not selected. */
+  related_records?: { record?: RawRef; relation?: string }[];
 }
 
 export interface RawDataDoi {
@@ -224,6 +255,32 @@ export interface HepdataSearchParams {
   sort: HepdataSort;
 }
 
+export interface AuthorSearchParams {
+  /** 1-based. */
+  page: number;
+  /** A name or identifier, routed by `routeAuthorQuery`. */
+  query: string;
+  /** Profiles per page, deleted ones included. */
+  size: number;
+}
+
+export interface ExperimentSearchParams {
+  /** 1-based. */
+  page: number;
+  query: string;
+  /** Records per page. */
+  size: number;
+}
+
+export interface InstitutionSearchParams {
+  /** 1-based. */
+  page: number;
+  /** Free text or INSPIRE syntax; digits alone are a recid. */
+  query: string;
+  /** Records per page. */
+  size: number;
+}
+
 // ─── Normalized domain shapes ───────────────────────────────────────────────
 
 export interface LiteratureHit {
@@ -266,11 +323,23 @@ export interface PaperAuthor {
 
 export interface PaperPublication {
   articleId?: string;
+  cnum?: string;
+  conferenceRecid?: string;
   freetext?: string;
   journal?: string;
   pages?: string;
+  /** Literature recid of the proceedings volume or book the contribution appears in. */
+  parentRecid?: string;
   volume?: string;
   year?: number;
+}
+
+export interface PaperThesis {
+  date?: string;
+  defenseDate?: string;
+  degreeType?: string;
+  /** Granting institutions in record order, a name-only repeat of a linked one dropped. */
+  institutions: { name: string; recid?: string }[];
 }
 
 /** One HEPData record linked to a paper, as INSPIRE's `data` collection describes it. */
@@ -345,7 +414,10 @@ export interface PaperDossier {
   reportNumbers: string[];
   resolvedAs: PaperIdKind;
   subjects: string[];
+  /** Every thesis supervisor, never paged; absent when the record names none. */
+  supervisors?: PaperAuthor[];
   texkeys: string[];
+  thesis?: PaperThesis;
   title: string;
   urls: { description?: string; url: string }[];
 }
@@ -407,6 +479,8 @@ export interface AuthorSearchPage {
   authors: AuthorProfile[];
   /** Hits dropped because the profile is marked deleted. */
   deletedDropped: number;
+  /** INSPIRE's `links.next`, which counts the raw page, deleted profiles included. */
+  hasMore: boolean;
   matchedAs: AuthorMatch;
   total: number;
 }
@@ -489,6 +563,34 @@ export interface ExperimentRecord {
 
 export interface ExperimentSearchPage {
   experiments: ExperimentRecord[];
+  /** INSPIRE's `links.next`: a further page exists. */
+  hasMore: boolean;
+  total: number;
+}
+
+export interface InstitutionRecord {
+  /** Every city across the record's addresses, in address order, repeats dropped. */
+  cities: string[];
+  /** Every country code across the record's addresses, repeats dropped. */
+  countryCodes: string[];
+  /** Most specific unit first; a level carries a name, an acronym, or both. */
+  hierarchy: { acronym?: string; name?: string }[];
+  inactive?: boolean;
+  institutionTypes: string[];
+  /** The recorded name `aff` matches and paper affiliations carry. */
+  legacyIcn?: string;
+  /** `affid:<recid>`. */
+  literatureQuery: string;
+  numberOfPapers?: number;
+  recid: string;
+  /** Linked institutions; `relation` is absent when INSPIRE records none of its fixed relations. */
+  relatedRecords: { recid: string; relation?: string }[];
+}
+
+export interface InstitutionSearchPage {
+  /** INSPIRE's `links.next`: a further page exists. */
+  hasMore: boolean;
+  institutions: InstitutionRecord[];
   total: number;
 }
 

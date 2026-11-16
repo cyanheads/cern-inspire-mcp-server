@@ -17,6 +17,7 @@ import type {
   RawDataMetadata,
   RawExperimentMetadata,
   RawHit,
+  RawInstitutionMetadata,
   RawLiteratureAuthor,
   RawLiteratureMetadata,
   RawSearchEnvelope,
@@ -163,6 +164,124 @@ export function dossierMetadata(
   });
 }
 
+// ─── Theses and conference contributions ────────────────────────────────────
+
+const INSPIRE_API = 'https://inspirehep.net/api';
+
+/** Supervisor `n` as the dossier selection returns one: name, profile record, BAI, role. */
+export const supervisorEntry = (n: number, affiliation?: string): RawLiteratureAuthor => ({
+  full_name: `Roe, Richard ${n}`,
+  record: { $ref: `${INSPIRE_API}/authors/${3000000 + n}` },
+  ids: [{ schema: 'INSPIRE BAI', value: `Richard.Roe.${n}` }],
+  ...(affiliation !== undefined && { affiliations: [{ value: affiliation }] }),
+  inspire_roles: ['supervisor'],
+});
+
+/**
+ * Theses shaped as INSPIRE serves the dossier selection: the student in
+ * `authors`, supervisors in their own `supervisors` array, and `thesis_info`.
+ * Recids, institutions, and dates are the real records'; people are synthetic.
+ */
+export const THESES = {
+  /** 2680186: a PhD at one linked institution, with a date and no defense date. */
+  phd: {
+    control_number: 2680186,
+    author_count: 1,
+    authors: [{ full_name: 'Doe, Jane 1' }],
+    supervisors: [supervisorEntry(1)],
+    document_type: ['thesis'],
+    publication_info: [{ year: 2023 }],
+    thesis_info: {
+      date: '2023',
+      institutions: [
+        { record: { $ref: `${INSPIRE_API}/institutions/903457` }, name: 'Calcutta U.' },
+      ],
+      degree_type: 'PhD',
+    },
+  },
+  /** 2859264: a Master's, its institution listed name-only and again with its record. */
+  master: {
+    control_number: 2859264,
+    author_count: 1,
+    authors: [{ full_name: 'Doe, Jane 2' }],
+    supervisors: [supervisorEntry(2, 'Minas Gerais U.')],
+    document_type: ['thesis'],
+    publication_info: [{ year: 2024 }],
+    thesis_info: {
+      date: '2024-12-13',
+      institutions: [
+        { name: 'Minas Gerais U.' },
+        { record: { $ref: `${INSPIRE_API}/institutions/908193` }, name: 'Minas Gerais U.' },
+      ],
+      degree_type: 'Master',
+      defense_date: '2024-10-25',
+    },
+  },
+  /** 2866041: a PhD at two distinct institutions, the first unlinked. */
+  joint: {
+    control_number: 2866041,
+    author_count: 1,
+    authors: [{ full_name: 'Doe, Jane 3' }],
+    supervisors: [supervisorEntry(3)],
+    document_type: ['thesis'],
+    publication_info: [{ year: 2024 }],
+    thesis_info: {
+      institutions: [
+        { name: 'Laboratoire de Physique de Clermont, France' },
+        {
+          record: { $ref: `${INSPIRE_API}/institutions/1088595` },
+          name: 'Tech. U., Dortmund (main)',
+        },
+      ],
+      date: '2024',
+      degree_type: 'PhD',
+    },
+  },
+} satisfies Record<string, RawLiteratureMetadata>;
+
+/**
+ * Conference contributions shaped as INSPIRE serves `publication_info`: an entry
+ * can hold only the conference number (`cnum`), the conference record, and the
+ * parent record (the proceedings volume or book). Real recids and CNUMs.
+ */
+export const CONFERENCE_PAPERS = {
+  /** 1959589: a year-only entry, then the conference link alone. */
+  icm: {
+    control_number: 1959589,
+    author_count: 1,
+    authors: [{ full_name: 'Doe, Jane' }],
+    publication_info: [
+      { year: 2023 },
+      { conference_record: { $ref: `${INSPIRE_API}/conferences/1915801` }, cnum: 'C22-07-06.1' },
+    ],
+  },
+  /** 18076: a journal entry, a conference entry in proceedings 256605, and pages in parent record 568498. */
+  proceedings: {
+    control_number: 18076,
+    author_count: 2,
+    authors: [{ full_name: 'Doe, Jane' }, { full_name: 'Roe, Richard' }],
+    publication_info: [
+      {
+        journal_volume: '34',
+        artid: '1642',
+        year: 1986,
+        page_start: '1642',
+        journal_title: 'Phys.Rev.D',
+      },
+      {
+        conference_record: { $ref: `${INSPIRE_API}/conferences/965760` },
+        parent_record: { $ref: `${INSPIRE_API}/literature/256605` },
+        cnum: 'C86-07-16',
+      },
+      {
+        page_end: '238',
+        page_start: '235',
+        parent_record: { $ref: `${INSPIRE_API}/literature/568498` },
+      },
+    ],
+  },
+} satisfies Record<string, RawLiteratureMetadata>;
+
 // ─── Data collection (HEPData index) ────────────────────────────────────────
 
 /** Record, two versions, parts under both; the latest version (v2) holds three tables. */
@@ -274,9 +393,10 @@ export function authorMetadata(overrides: Partial<RawAuthorMetadata> = {}): RawA
   };
 }
 
-export function authorPage(
-  metadata: readonly RawAuthorMetadata[] = [authorMetadata()],
-  options: { total?: number } = {},
+/** A search page of records whose hit ids come from their `control_number`. */
+function recordPage<M extends { control_number?: number }>(
+  metadata: readonly M[],
+  options: { next?: boolean; total?: number },
 ) {
   return searchBody(
     metadata.map((m) =>
@@ -284,6 +404,13 @@ export function authorPage(
     ),
     options,
   );
+}
+
+export function authorPage(
+  metadata: readonly RawAuthorMetadata[] = [authorMetadata()],
+  options: { next?: boolean; total?: number } = {},
+) {
+  return recordPage(metadata, options);
 }
 
 // ─── Experiments ────────────────────────────────────────────────────────────
@@ -310,14 +437,96 @@ export function experimentMetadata(
 
 export function experimentPage(
   metadata: readonly RawExperimentMetadata[] = [experimentMetadata()],
-  options: { total?: number } = {},
+  options: { next?: boolean; total?: number } = {},
 ) {
-  return searchBody(
-    metadata.map((m) =>
-      hit(m, m.control_number === undefined ? undefined : String(m.control_number)),
-    ),
-    options,
-  );
+  return recordPage(metadata, options);
+}
+
+// ─── Institutions ───────────────────────────────────────────────────────────
+
+/**
+ * Institution records as INSPIRE served them on 2026-11-15, cut to the fields
+ * the search selects. `uwPhysics` names `uwMain` as its parent through an
+ * `/api/institutions/N` reference; `zeuthen` is inactive, has no hierarchy, and
+ * links two parents, a predecessor, and a successor through the
+ * `/institutions/N` form; `cenpa` gives a hierarchy level an acronym.
+ */
+export const INSTITUTIONS = {
+  uwMain: {
+    control_number: 945165,
+    legacy_ICN: 'U. Washington, Seattle (main)',
+    institution_hierarchy: [{ name: 'University of Washington' }],
+    institution_type: ['University'],
+    addresses: [{ cities: ['Seattle'], country_code: 'US' }],
+    number_of_papers: 413,
+  },
+  uwPhysics: {
+    control_number: 903338,
+    legacy_ICN: 'Washington U., Seattle',
+    institution_hierarchy: [
+      { name: 'Department of physics' },
+      { name: 'University of Washington' },
+    ],
+    institution_type: ['University'],
+    addresses: [{ cities: ['Seattle'], country_code: 'US' }],
+    number_of_papers: 10812,
+    related_records: [
+      { record: { $ref: `${INSPIRE_API}/institutions/945165` }, relation: 'parent' },
+    ],
+  },
+  cenpa: {
+    control_number: 909968,
+    legacy_ICN: 'CENPA, Seattle',
+    institution_hierarchy: [
+      { name: 'Center for Experimental Nuclear Physics and Astrophysics', acronym: 'CENPA' },
+      { name: 'University of Washington' },
+    ],
+    institution_type: ['University'],
+    addresses: [{ cities: ['Seattle'], country_code: 'US' }],
+    number_of_papers: 498,
+    related_records: [
+      { record: { $ref: `${INSPIRE_API}/institutions/945165` }, relation: 'parent' },
+    ],
+  },
+  tokyo: {
+    control_number: 903273,
+    legacy_ICN: 'Tokyo U.',
+    institution_hierarchy: [{ name: 'Department of Physics' }, { name: 'University of Tokyo' }],
+    institution_type: ['University'],
+    addresses: [{ cities: ['Tokyo'], country_code: 'JP' }],
+    number_of_papers: 13718,
+    related_records: [
+      { record: { $ref: `${INSPIRE_API}/institutions/1209632` }, relation: 'parent' },
+    ],
+  },
+  zeuthen: {
+    control_number: 2180671,
+    legacy_ICN: 'IfH, Zeuthen',
+    institution_type: ['Research Center'],
+    addresses: [{ cities: ['Zeuthen'], country_code: 'DD' }],
+    number_of_papers: 14,
+    inactive: true,
+    related_records: [
+      { record: { $ref: 'https://inspirehep.net/institutions/3094652' }, relation: 'parent' },
+      { record: { $ref: 'https://inspirehep.net/institutions/3094653' }, relation: 'parent' },
+      { record: { $ref: 'https://inspirehep.net/institutions/3095957' }, relation: 'predecessor' },
+      { record: { $ref: 'https://inspirehep.net/institutions/902666' }, relation: 'successor' },
+    ],
+  },
+} satisfies Record<string, RawInstitutionMetadata>;
+
+/** The physics department record, with `overrides` laid over it. */
+export function institutionMetadata(
+  overrides: Partial<RawInstitutionMetadata> = {},
+): RawInstitutionMetadata {
+  return { ...INSTITUTIONS.uwPhysics, ...overrides };
+}
+
+export function institutionPage(
+  metadata: readonly RawInstitutionMetadata[] = [institutionMetadata()],
+  options: { next?: boolean; total?: number } = {},
+) {
+  return recordPage(metadata, options);
 }
 
 // ─── Citation summary ───────────────────────────────────────────────────────

@@ -1,8 +1,10 @@
 /**
  * @fileoverview cern_inspire_get_paper — one INSPIRE-HEP paper's full record by
- * recid, arXiv ID, or DOI: contributors with affiliations and recorded roles, public attached-document links, abstract, publication,
- * identifiers, citation counts, linked experiments, and whether HEPData holds
- * its numerical tables. Also exports the dossier schema the
+ * recid, arXiv ID, or DOI: contributors with affiliations and recorded roles,
+ * thesis supervisors and degree details, public attached-document links,
+ * abstract, publication with conference and parent-record links, identifiers,
+ * citation counts, linked experiments, and whether HEPData holds its numerical
+ * tables. Also exports the dossier schema the
  * `inspire://literature/{recid}` resource validates against.
  * @module mcp-server/tools/definitions/get-paper.tool
  */
@@ -31,6 +33,33 @@ const hepdataRecordFields = {
     .optional()
     .describe(
       "The HEPData record page on hepdata.net, where the table values are read: keyed by the record number in recordDoi, or by this paper's recid (/record/ins followed by the recid) when recordDoi names no number.",
+    ),
+};
+
+/** One person on the record: a contributor in `authors`, or a thesis supervisor in `supervisors`. */
+const contributorFields = {
+  name: z.string().describe('Contributor name, "Surname, Given names".'),
+  roles: z
+    .array(z.string().describe('Recorded INSPIRE contributor role.'))
+    .optional()
+    .describe('Roles in recorded order; absent roles are unknown.'),
+  recid: z
+    .string()
+    .optional()
+    .describe(
+      'INSPIRE author record ID, when linked; pass as query to cern_inspire_search_authors for the profile.',
+    ),
+  bai: z
+    .string()
+    .optional()
+    .describe(
+      'INSPIRE BAI (e.g. Edward.Witten.1), when known; pass as author to cern_inspire_get_citation_summary.',
+    ),
+  orcid: z.string().optional().describe('ORCID, when known.'),
+  affiliations: z
+    .array(z.string().describe('Affiliation name.'))
+    .describe(
+      'Affiliations listed for this contributor on this paper, each the institution name INSPIRE records (e.g. Tokyo U.); cern_inspire_search_institutions with query legacy_ICN:"NAME" finds that institution\'s record and recid exactly.',
     ),
 };
 
@@ -83,35 +112,15 @@ export const paperDossierSchema = z.object({
       'Pass as author_offset to read the next page; absent when no contributors remain or the budget is zero.',
     ),
   authors: z
-    .array(
-      z
-        .object({
-          name: z.string().describe('Contributor name, "Surname, Given names".'),
-          roles: z
-            .array(z.string().describe('Recorded INSPIRE contributor role.'))
-            .optional()
-            .describe('Roles in recorded order; absent roles are unknown.'),
-          recid: z
-            .string()
-            .optional()
-            .describe(
-              'INSPIRE author record ID, when linked; pass as query to cern_inspire_search_authors for the profile.',
-            ),
-          bai: z
-            .string()
-            .optional()
-            .describe(
-              'INSPIRE BAI (e.g. Edward.Witten.1), when known; pass as author to cern_inspire_get_citation_summary.',
-            ),
-          orcid: z.string().optional().describe('ORCID, when known.'),
-          affiliations: z
-            .array(z.string().describe('Affiliation name.'))
-            .describe('Affiliations listed for this contributor on this paper.'),
-        })
-        .describe('One contributor.'),
-    )
+    .array(z.object(contributorFields).describe('One contributor.'))
     .describe(
       'Contributors in record order from authorOffset, capped at the effective max_authors budget.',
+    ),
+  supervisors: z
+    .array(z.object(contributorFields).describe('One thesis supervisor.'))
+    .optional()
+    .describe(
+      'Thesis supervisors in record order, in the contributor shape. INSPIRE lists them apart from the contributors, so they are not counted in authorCount and are listed whole, whatever max_authors and author_offset say. Absent when the record names none.',
     ),
   collaborations: z
     .array(z.string().describe('Collaboration name.'))
@@ -150,10 +159,58 @@ export const paperDossierSchema = z.object({
             .optional()
             .describe('Article ID, for journals that number articles.'),
           freetext: z.string().optional().describe('Free-text publication reference.'),
+          cnum: z
+            .string()
+            .optional()
+            .describe(
+              "INSPIRE conference number (CNUM) of the conference the paper was contributed to; the query publication_info.cnum:CNUM in cern_inspire_search_literature lists the conference's contributions.",
+            ),
+          conferenceRecid: z
+            .string()
+            .optional()
+            .describe('INSPIRE conference record ID, when linked.'),
+          parentRecid: z
+            .string()
+            .optional()
+            .describe(
+              'Literature recid of the proceedings volume or book the paper appears in, when linked; pass as paper to cern_inspire_get_paper.',
+            ),
         })
         .describe('One publication reference.'),
     )
-    .describe('Publication references (journal, volume, year, pages).'),
+    .describe(
+      'Publication references (journal, volume, year, pages), with conference and parent-record links; an entry may hold only the links.',
+    ),
+  thesis: z
+    .object({
+      degreeType: z
+        .string()
+        .optional()
+        .describe('Degree as INSPIRE records it (e.g. PhD, Master).'),
+      institutions: z
+        .array(
+          z
+            .object({
+              name: z.string().describe('Institution name.'),
+              recid: z
+                .string()
+                .optional()
+                .describe(
+                  "INSPIRE institution record ID, when linked; affid:N in cern_inspire_search_literature selects the institution's papers.",
+                ),
+            })
+            .describe('One granting institution.'),
+        )
+        .describe(
+          'Granting institutions in record order; an unlinked entry with the exact name of a linked one is left out.',
+        ),
+      defenseDate: z.string().optional().describe('Defense date, when recorded.'),
+      date: z.string().optional().describe('Thesis date, when recorded.'),
+    })
+    .optional()
+    .describe(
+      'Thesis details: degree, granting institutions, and dates. Absent when the record carries none.',
+    ),
   arxivId: z.string().optional().describe('arXiv identifier, when the paper has one.'),
   arxivCategories: z
     .array(z.string().describe('arXiv category.'))
@@ -260,6 +317,7 @@ export type PaperDossierOutput = z.infer<typeof paperDossierSchema>;
 
 const yesNo = (value: boolean) => (value ? 'yes' : 'no');
 
+/** `Journal Vol (Year) pages`, free text after a dash, then the conference and parent-record links. */
 function renderPublication(p: PaperDossierOutput['publications'][number]): string {
   const parts = [
     p.journal && inline(p.journal),
@@ -269,7 +327,32 @@ function renderPublication(p: PaperDossierOutput['publications'][number]): strin
     p.articleId && `article ${inline(p.articleId)}`,
   ].filter(Boolean);
   if (p.freetext) parts.push(`${parts.length > 0 ? '— ' : ''}${inline(p.freetext)}`);
-  return `- ${atLineStart(parts.join(' '))}`;
+  const links = [
+    p.cnum && `CNUM ${identifier(p.cnum)}`,
+    p.conferenceRecid && `conference recid ${p.conferenceRecid}`,
+    p.parentRecid && `parent recid ${p.parentRecid}`,
+  ].filter(Boolean);
+  return `- ${atLineStart([parts.join(' '), ...links].filter(Boolean).join(' · '))}`;
+}
+
+function renderThesis(t: NonNullable<PaperDossierOutput['thesis']>): string[] {
+  const lines = ['### Thesis'];
+  const facts = [
+    t.degreeType && `**Degree type:** ${inline(t.degreeType)}`,
+    t.defenseDate && `**Defense date:** ${inline(t.defenseDate)}`,
+    t.date && `**Date:** ${inline(t.date)}`,
+  ].filter(Boolean);
+  if (facts.length > 0) lines.push(facts.join(' · '));
+  if (t.institutions.length > 0) {
+    lines.push(
+      '**Institutions:**',
+      ...t.institutions.map(
+        (i) =>
+          `- ${atLineStart(inline(i.name))}${i.recid ? ` (institution recid ${i.recid})` : ''}`,
+      ),
+    );
+  }
+  return lines;
 }
 
 function renderAuthor(a: PaperDossierOutput['authors'][number]): string {
@@ -407,6 +490,7 @@ function renderPaperDossier(paper: PaperDossierOutput): string {
   if (paper.publications.length > 0) {
     lines.push('', '### Publication', ...paper.publications.map(renderPublication));
   }
+  if (paper.thesis) lines.push('', ...renderThesis(paper.thesis));
   if (paper.abstract) {
     lines.push(
       '',
@@ -424,6 +508,13 @@ function renderPaperDossier(paper: PaperDossierOutput): string {
       : [`**Next author offset:** ${paper.nextAuthorOffset}`]),
     ...paper.authors.map(renderAuthor),
   );
+  if (paper.supervisors) {
+    lines.push(
+      '',
+      `### Supervisors (${paper.supervisors.length})`,
+      ...paper.supervisors.map(renderAuthor),
+    );
+  }
   if (paper.keywords.length > 0) {
     lines.push('', `**Keywords:** ${paper.keywords.map(identifier).join('; ')}`);
   }
@@ -481,7 +572,7 @@ function renderPaperDossier(paper: PaperDossierOutput): string {
 export const getPaperTool = tool('cern_inspire_get_paper', {
   title: 'Get INSPIRE paper',
   description:
-    "Fetch one paper's full INSPIRE-HEP record by recid, arXiv ID, or DOI: contributors with affiliations and recorded roles, public attached-document links and identifiers, abstract, publication references, arXiv and DOI identifiers, keywords, subjects, citation counts, linked experiments, texkeys, and whether HEPData holds its numerical tables (record DOI, latest version, table count, hepdata.net link). Also returns ready-made literature queries for the papers citing it and for its references. Large collaboration papers can list thousands of authors; max_authors caps the list while authorCount gives the full number.",
+    "Fetch one paper's full INSPIRE-HEP record by recid, arXiv ID, or DOI: contributors with affiliations and recorded roles, thesis supervisors and degree details, public attached-document links and identifiers, abstract, publication references with conference and proceedings links, arXiv and DOI identifiers, keywords, subjects, citation counts, linked experiments, texkeys, and whether HEPData holds its numerical tables (record DOI, latest version, table count, hepdata.net link). Also returns ready-made literature queries for the papers citing it and for its references. Large collaboration papers can list thousands of authors; max_authors caps the list while authorCount gives the full number.",
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     paper: paperInput,

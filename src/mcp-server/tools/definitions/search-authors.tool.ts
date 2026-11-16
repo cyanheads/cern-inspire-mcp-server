@@ -1,14 +1,21 @@
 /**
- * @fileoverview cern_inspire_search_authors — INSPIRE-HEP author profiles by
- * name, BAI, ORCID, INSPIRE ID, or author recid: positions, identifiers,
- * advisors, arXiv categories, and the literature query that selects each
- * person's papers. Returns ranked candidates; never auto-picks among namesakes.
+ * @fileoverview cern_inspire_search_authors — one page of INSPIRE-HEP author
+ * profiles by name, BAI, ORCID, INSPIRE ID, or author recid: positions,
+ * identifiers, advisors, arXiv categories, and the literature query that
+ * selects each person's papers. Returns ranked candidates; never auto-picks
+ * among namesakes.
  * @module mcp-server/tools/definitions/search-authors.tool
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { authorQueryInput, blankAsUnset } from '@/mcp-server/tools/inputs.js';
+import {
+  authorQueryInput,
+  blankAsUnset,
+  moreResultsNotice,
+  pastLastPageNotice,
+  RESULT_WINDOW,
+} from '@/mcp-server/tools/inputs.js';
 import type { AuthorMatch } from '@/services/inspire/identifiers.js';
 import { getInspireService } from '@/services/inspire/inspire-service.js';
 import { atLineStart, callerEcho, identifier, inline, printUrl } from '@/utils/render.js';
@@ -239,35 +246,56 @@ function renderAuthor(a: AuthorProfileOutput, position: number): string[] {
 export const searchAuthorsTool = tool('cern_inspire_search_authors', {
   title: 'Search INSPIRE authors',
   description:
-    "Find physicist profiles in INSPIRE-HEP by name, INSPIRE BAI, ORCID, INSPIRE ID, or author recid. Each profile carries its recid, BAI, ORCID, current and past positions, advisors, arXiv categories, links, awards, and a literatureQuery that selects the person's papers in cern_inspire_search_literature. A name returns ranked candidates (a bare surname can match tens of thousands of profiles, and a less-cited namesake can rank first), so confirm the person from positions and categories before passing a bai or recid to cern_inspire_get_citation_summary. An identifier matches exactly.",
+    "Find physicist profiles in INSPIRE-HEP by name, INSPIRE BAI, ORCID, INSPIRE ID, or author recid. Each profile carries its recid, BAI, ORCID, current and past positions, advisors, arXiv categories, links, awards, and a literatureQuery that selects the person's papers in cern_inspire_search_literature. A name returns one page of ranked candidates (a bare surname can match tens of thousands of profiles, and a less-cited namesake can rank first), so confirm the person from positions and categories before passing a bai or recid to cern_inspire_get_citation_summary, and request further pages with page before concluding the person is absent. An identifier matches exactly. Only the first 10,000 results of a query are reachable.",
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     query: authorQueryInput,
+    page: blankAsUnset(z.number().int().min(1).default(1)).describe(
+      'Page number, starting at 1. page × effective limit (after clamping) may not exceed 10,000.',
+    ),
     limit: blankAsUnset(z.number().int().min(1).default(5)).describe(
-      'Profiles to return (positive integer, default 5; above 25 uses 25).',
+      'Profiles per page (positive integer, default 5; above 25 uses 25).',
     ),
   }),
   output: z.object({
     authors: z
       .array(authorProfileSchema)
-      .describe('Matching profiles, in INSPIRE relevance order.'),
+      .describe('The profiles on this page, in INSPIRE relevance order.'),
+    page: z.number().describe('The page returned.'),
+    limit: z.number().describe('The effective limit after clamping: profiles per page.'),
+    hasMore: z.boolean().describe('True when INSPIRE has a further page of results.'),
   }),
   enrichment: {
     totalCount: z.number().describe('Total author profiles the query matched.'),
-    truncated: z.boolean().describe('True when more profiles matched than were returned.'),
-    shown: z.number().describe('Number of profiles returned.'),
+    truncated: z.boolean().describe('True when more results exist beyond this page.'),
+    shown: z.number().describe('Number of profiles on this page.'),
     cap: z.number().describe('The limit applied.'),
+    nextPage: z
+      .number()
+      .optional()
+      .describe(
+        'The page number to request next, with the same limit, when one exists within the 10,000-result window.',
+      ),
     matchedAs: z
       .string()
       .describe(
         'How the query was read: orcid, inspire_id, bai, or recid (exact identifier match), or name (free-text search).',
       ),
-    notice: z.string().optional().describe('Guidance on an empty or capped result.'),
+    notice: z.string().optional().describe('Guidance on an empty or paged result.'),
   },
   enrichmentTrailer: {
+    nextPage: { label: 'Next page' },
     matchedAs: { label: 'Matched as' },
   },
   errors: [
+    {
+      reason: 'beyond_result_window',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'page × effective limit (after clamping) exceeds the 10,000 results INSPIRE serves for one query.',
+      recovery:
+        "Pin the person with a BAI, ORCID, or INSPIRE ID (cern_inspire_get_paper lists them for a paper's authors), then retry cern_inspire_search_authors; extra name parts widen a name search, since INSPIRE reads them as initials.",
+      severity: 'notice',
+    },
     {
       reason: 'invalid_query',
       code: JsonRpcErrorCode.ValidationError,
@@ -300,7 +328,7 @@ export const searchAuthorsTool = tool('cern_inspire_search_authors', {
       code: JsonRpcErrorCode.ServiceUnavailable,
       when: 'The INSPIRE body exceeded the byte ceiling, was HTML where JSON was expected, or was invalid JSON.',
       recovery:
-        'Retry this call in a few seconds; if it fails again, retry cern_inspire_search_authors with a smaller limit.',
+        'Retry this call in a few seconds; if it fails again, INSPIRE is likely serving an error page, so wait a minute before retrying cern_inspire_search_authors with the same page and limit.',
       thrownBy: 'service',
     },
   ],
@@ -314,8 +342,19 @@ export const searchAuthorsTool = tool('cern_inspire_search_authors', {
     ctx.enrich({ truncated: false, shown: 0, cap: input.limit, matchedAs: 'name' });
     ctx.enrich.total(0);
 
+    if (input.page * input.limit > RESULT_WINDOW) {
+      throw ctx.fail(
+        'beyond_result_window',
+        `page ${input.page} × limit ${input.limit} reaches past the first 10,000 results, which is all INSPIRE serves for one query.`,
+        { page: input.page, limit: input.limit },
+      );
+    }
+
     const inspire = getInspireService();
-    const result = await inspire.searchAuthors(input.query, input.limit, inspire.beginCall(ctx));
+    const result = await inspire.searchAuthors(
+      { query: input.query, page: input.page, size: input.limit },
+      inspire.beginCall(ctx),
+    );
     const shown = result.authors.length;
     ctx.enrich({ matchedAs: result.matchedAs, shown });
     ctx.enrich.total(result.total);
@@ -324,24 +363,30 @@ export const searchAuthorsTool = tool('cern_inspire_search_authors', {
       total: result.total,
       shown,
       deletedDropped: result.deletedDropped,
+      page: input.page,
     });
 
-    const truncated = result.total > shown + result.deletedDropped;
     const notices: string[] = reduction ? [reduction] : [];
     if (
       result.matchedAs === 'name' &&
       shown > 0 &&
       !carriesQueriedSurname(input.query, result.authors)
     ) {
+      // Past page 1 the surname matches may simply have ended, so a miss is no proof of a misspelling.
       notices.push(
-        `No profile on this page has a surname in "${callerEcho(input.query)}"; INSPIRE widened the match by reading name parts as initials, so these may be other people. Check the spelling, or search by BAI or ORCID.`,
+        input.page === 1
+          ? `No profile on this page has a surname in "${callerEcho(input.query)}"; INSPIRE widened the match by reading name parts as initials, so these may be other people. Check the spelling, or search by BAI or ORCID.`
+          : `No profile on this page has a surname in "${callerEcho(input.query)}"; past the profiles that carry the surname, INSPIRE lists ones matched only through name parts read as initials, so these may be other people. If no earlier page listed the surname, check the spelling; to pin one person, search by BAI or ORCID.`,
       );
     }
-    if (truncated) {
+    if (result.hasMore) {
+      const nextPage = input.page + 1;
+      const reachable = nextPage * input.limit <= RESULT_WINDOW;
+      if (reachable) ctx.enrich({ nextPage });
       notices.push(
-        input.limit < MAX_LIMIT
-          ? `More profiles matched; raise limit (max ${MAX_LIMIT}), add name parts, or search by BAI or ORCID to pin one person.`
-          : 'More profiles matched than the 25 returned; add name parts, or search by BAI or ORCID to pin one person.',
+        reachable
+          ? `${moreResultsNotice(nextPage, 'limit', input.limit)} To pin one person, search by BAI or ORCID.`
+          : 'INSPIRE serves only the first 10,000 results of a query; to pin one person, search by BAI or ORCID.',
       );
     }
     if (result.total === 0) {
@@ -349,6 +394,9 @@ export const searchAuthorsTool = tool('cern_inspire_search_authors', {
         `No INSPIRE author profile matched "${callerEcho(input.query)}" as ${result.matchedAs}.`,
         ZERO_HIT_HINTS[result.matchedAs],
       );
+    } else if (shown + result.deletedDropped === 0) {
+      // The raw page is empty, deleted profiles included: the page is past the end.
+      notices.push(pastLastPageNotice(input.page, result.total, input.limit));
     }
     if (result.deletedDropped > 0) {
       notices.push(
@@ -356,19 +404,28 @@ export const searchAuthorsTool = tool('cern_inspire_search_authors', {
       );
     }
 
-    if (truncated) {
+    if (result.hasMore) {
       ctx.enrich.truncated({ shown, cap: input.limit, guidance: notices.join(' ') });
     } else if (notices.length > 0) {
       ctx.enrich.notice(notices.join(' '));
     }
 
-    return { authors: result.authors };
+    return {
+      authors: result.authors,
+      page: input.page,
+      limit: input.limit,
+      hasMore: result.hasMore,
+    };
   },
 
   format: (result) => {
-    const lines = [`## INSPIRE author profiles (${result.authors.length})`];
+    const lines = [
+      `## INSPIRE author profiles, page ${result.page}`,
+      `**Page:** ${result.page} · **Limit:** ${result.limit} · **Profiles on this page:** ${result.authors.length} · **More pages:** ${result.hasMore ? 'yes' : 'no'}`,
+    ];
+    const offset = (result.page - 1) * result.limit;
     result.authors.forEach((author, i) => {
-      lines.push('', ...renderAuthor(author, i + 1));
+      lines.push('', ...renderAuthor(author, offset + i + 1));
     });
     return [{ type: 'text', text: lines.join('\n') }];
   },

@@ -10,6 +10,7 @@ import { listReferenceTool } from './list-reference.tool.js';
 import { searchAuthorsTool } from './search-authors.tool.js';
 import { searchExperimentsTool } from './search-experiments.tool.js';
 import { searchHepdataTool } from './search-hepdata.tool.js';
+import { searchInstitutionsTool } from './search-institutions.tool.js';
 import { searchLiteratureTool } from './search-literature.tool.js';
 
 export const allToolDefinitions = [
@@ -19,6 +20,7 @@ export const allToolDefinitions = [
   searchAuthorsTool,
   getCitationSummaryTool,
   searchExperimentsTool,
+  searchInstitutionsTool,
   searchHepdataTool,
   listReferenceTool,
 ];
