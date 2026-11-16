@@ -8,21 +8,23 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import {
+  arxivVersionNotice,
   blankAsUnset,
   documentTypesInput,
   formatAppliedFilters,
   hasEmptyQueryField,
   hasFacetFilters,
+  moreResultsNotice,
+  pastLastPageNotice,
+  RESULT_WINDOW,
   subjectsInput,
+  unversionArxivIds,
   yearFromInput,
   yearToInput,
 } from '@/mcp-server/tools/inputs.js';
 import { getInspireService } from '@/services/inspire/inspire-service.js';
 import type { FacetFilters } from '@/services/inspire/types.js';
 import { callerEcho, identifier, inline, quote } from '@/utils/render.js';
-
-/** INSPIRE serves at most this many results of one query (`page × size`). */
-const RESULT_WINDOW = 10_000;
 
 /** Above this many matches a query is flagged as possibly mis-parsed (Design Decisions #17). */
 const BROAD_MATCH_THRESHOLD = 100_000;
@@ -244,12 +246,17 @@ export const searchLiteratureTool = tool('cern_inspire_search_literature', {
       .number()
       .optional()
       .describe(
-        'The page number to request next, when one exists within the 10,000-result window.',
+        'The page number to request next, with the same size, when one exists within the 10,000-result window.',
       ),
     appliedFilters: z
       .string()
       .describe('Sort and filters applied, e.g. "sort=mostcited; years=2012–2015", or "none".'),
-    notice: z.string().optional().describe('Guidance on an empty, very broad, or paged result.'),
+    notice: z
+      .string()
+      .optional()
+      .describe(
+        'Guidance on an empty, very broad, or paged result, and each arXiv clause sent without its version suffix.',
+      ),
   },
   enrichmentTrailer: {
     nextPage: { label: 'Next page' },
@@ -348,9 +355,10 @@ export const searchLiteratureTool = tool('cern_inspire_search_literature', {
       );
     }
 
+    const sent = unversionArxivIds(input.query);
     const inspire = getInspireService();
     const result = await inspire.searchLiterature(
-      { query: input.query, sort: input.sort, page: input.page, size: input.size, ...filters },
+      { query: sent.query, sort: input.sort, page: input.page, size: input.size, ...filters },
       inspire.beginCall(ctx),
     );
     ctx.enrich.total(result.total);
@@ -361,9 +369,11 @@ export const searchLiteratureTool = tool('cern_inspire_search_literature', {
       page: input.page,
     });
 
-    const notices: string[] = reduction ? [reduction] : [];
+    const notices = [reduction, arxivVersionNotice(sent.rewrites)].filter(
+      (notice) => notice !== undefined,
+    );
     if (result.papers.length === 0) {
-      notices.push(...zeroHitNotice(input, result.total, filters));
+      notices.push(...zeroHitNotice({ ...input, query: sent.query }, result.total, filters));
     } else if (result.total > BROAD_MATCH_THRESHOLD) {
       notices.push(
         `This query matched ${result.total.toLocaleString('en-US')} of INSPIRE's ~1.9 M records. INSPIRE does not reject malformed syntax (an unparsed operator widens the match), so check the query against cern_inspire_list_reference topic search_syntax.`,
@@ -376,7 +386,7 @@ export const searchLiteratureTool = tool('cern_inspire_search_literature', {
       if (reachable) ctx.enrich({ nextPage });
       notices.unshift(
         reachable
-          ? `More results: request page ${nextPage} for the next ${input.size}.`
+          ? moreResultsNotice(nextPage, 'size', input.size)
           : 'INSPIRE serves only the first 10,000 results of a query; narrow it with year_from/year_to, document_types, or tighter terms to reach the rest.',
       );
       ctx.enrich.truncated({
@@ -415,11 +425,7 @@ function zeroHitNotice(
   total: number,
   filters: FacetFilters,
 ): string[] {
-  if (total > 0) {
-    return [
-      `Page ${input.page} is past the last page (${Math.ceil(total / input.size)}); request a lower page.`,
-    ];
-  }
+  if (total > 0) return [pastLastPageNotice(input.page, total, input.size)];
   const fragments = [`No INSPIRE literature matched "${callerEcho(input.query)}".`];
   if (hasFacetFilters(filters)) {
     fragments.push(

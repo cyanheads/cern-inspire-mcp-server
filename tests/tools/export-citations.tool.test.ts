@@ -454,11 +454,13 @@ describe('required enrichment', () => {
       cap: 2,
       nextPage: 2,
       notice:
-        'More papers matched; request page 2 for the next 2, or raise size (up to 50) to export more per call.',
+        'More papers matched; request page 2 with size 2, or page 1 with a larger size (up to 50) to export more per call.',
     });
     expect(fullText(result)).toContain('**truncated:** true');
     expect(fullText(result)).toContain('**Next page:** 2');
-    expect(fullText(result)).toContain('> More papers matched; request page 2 for the next 2');
+    expect(fullText(result)).toContain(
+      '> More papers matched; request page 2 with size 2, or page 1 with a larger size (up to 50) to export more per call.',
+    );
     expect(bodyText(result)).toContain('(bibtex, 2 entries)');
     expect(bodyText(result)).not.toContain('Doe:2020xyz');
   });
@@ -468,7 +470,7 @@ describe('required enrichment', () => {
 
     const out = structured<Output>(await run({ query: 'citedby:recid:1124337', size: 50 }));
 
-    expect(out.notice).toBe('More papers matched; request page 2 for the next 50.');
+    expect(out.notice).toBe('More papers matched; request page 2 with size 50.');
   });
 
   it('truncates a LaTeX export the same way', async () => {
@@ -513,8 +515,8 @@ describe('paging', () => {
       expect(outs.map((o) => o.truncated)).toEqual([true, true, false, false]);
       expect(outs.map((o) => o.nextPage)).toEqual([2, 3, undefined, undefined]);
       expect(outs.map((o) => o.notice)).toEqual([
-        'More papers matched; request page 2 for the next 50.',
-        'More papers matched; request page 3 for the next 50.',
+        'More papers matched; request page 2 with size 50.',
+        'More papers matched; request page 3 with size 50.',
         undefined,
         'Page 4 is past the last page (3); request a lower page.',
       ]);
@@ -542,6 +544,36 @@ describe('paging', () => {
       expect(texts[3]).toContain('> Page 4 is past the last page (3); request a lower page.');
     },
   );
+
+  it('walks all 138 references at size 25 by sending exactly the page and size each notice names', async () => {
+    h.route('/literature', pagedLiterature(HIGGS_REFERENCE_TEXKEYS));
+
+    const texkeys: string[] = [];
+    const recipes: string[] = [];
+    let call: Input | undefined = { query: CITED_BY_HIGGS, size: 25 };
+    for (let calls = 0; call && calls < 10; calls++) {
+      const result = await run(call);
+      const out = structured<Output>(result);
+      texkeys.push(...out.entries.map((e) => e.texkey));
+      const recipe = /request page (\d+) with size (\d+)/.exec(out.notice ?? '');
+      recipes.push(recipe?.[0] ?? 'none');
+      if (recipe) expect(fullText(result)).toContain(recipe[0]);
+      call = recipe
+        ? { query: CITED_BY_HIGGS, page: Number(recipe[1]), size: Number(recipe[2]) }
+        : undefined;
+    }
+
+    expect(recipes).toEqual([
+      'request page 2 with size 25',
+      'request page 3 with size 25',
+      'request page 4 with size 25',
+      'request page 5 with size 25',
+      'request page 6 with size 25',
+      'none',
+    ]);
+    expect(texkeys).toEqual(HIGGS_REFERENCE_TEXKEYS);
+    expect(exportCitationsTool.enrichment?.nextPage?.description).toContain('same size');
+  });
 
   it('answers the past-the-end page of an OR query with no entries and names the last page', async () => {
     h.route('/literature', pagedLiterature(['ATLAS:2012yve', 'CMS:2012qbp'], { leftover: true }));
@@ -622,7 +654,7 @@ describe('paging', () => {
       'inside the count, with more pages after it',
       138,
       2,
-      'More papers matched; request page 3 for the next 50. Page 2 came back empty although INSPIRE counts 138 matches (3 pages at this size); retry this call in a few seconds.',
+      'More papers matched; request page 3 with size 50. Page 2 came back empty although INSPIRE counts 138 matches (3 pages at this size); retry this call in a few seconds.',
       true,
     ],
     [

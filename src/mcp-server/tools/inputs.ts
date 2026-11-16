@@ -1,8 +1,10 @@
 /**
  * @fileoverview Input schemas and helpers shared across the INSPIRE tools: the
- * blank-as-unset wrapper for form clients, the `paper` identifier input and the
- * route from a HEPData record to its paper, the facet enum arrays (comma-joined
- * or array, case-folded), the year bounds, the author-identifier inputs, and the
+ * blank-as-unset wrapper for form clients, the paging window and past-the-end
+ * notice, the query scanners (the empty-field guard and the arXiv version-suffix
+ * rewrite with its notice), the `paper` identifier input and the route from a
+ * HEPData record to its paper, the facet enum arrays (comma-joined or array,
+ * case-folded), the year bounds, the author-identifier inputs, and the
  * applied-filters echo string.
  * @module mcp-server/tools/inputs
  */
@@ -13,9 +15,11 @@ import {
   normalizeAuthorId,
   normalizePaperId,
   PAPER_ID_PATTERN,
+  stripArxivVersion,
 } from '@/services/inspire/identifiers.js';
 import type { FacetFilters } from '@/services/inspire/types.js';
 import { DOCUMENT_TYPES, SUBJECTS } from '@/services/inspire/vocabulary.js';
+import { callerEcho } from '@/utils/render.js';
 
 /**
  * Treats `''` as unset before `schema` runs, so a form client's blank optional
@@ -23,6 +27,20 @@ import { DOCUMENT_TYPES, SUBJECTS } from '@/services/inspire/vocabulary.js';
  */
 export const blankAsUnset = <T extends z.ZodType>(schema: T) =>
   z.preprocess((value) => (value === '' ? undefined : value), schema);
+
+/** INSPIRE serves at most this many results of one query (`page × size`). */
+export const RESULT_WINDOW = 10_000;
+
+/** The notice for a page that holds nothing although the query matched `total` records. */
+export const pastLastPageNotice = (page: number, total: number, size: number): string =>
+  `Page ${page} is past the last page (${Math.ceil(total / size)}); request a lower page.`;
+
+/** The next-page notice; it names the page-size parameter and its value, since the next call must repeat the size to keep the page boundaries. */
+export const moreResultsNotice = (
+  nextPage: number,
+  param: 'limit' | 'size',
+  value: number,
+): string => `More results: request page ${nextPage} with ${param} ${value}.`;
 
 /** Known aliases from INSPIRE's query-parser keyword tables, not arbitrary metadata paths. */
 const QUERY_FIELDS = new Set(
@@ -91,6 +109,188 @@ export function hasEmptyQueryField(query: string): boolean {
       return true;
   }
   return false;
+}
+
+/** The fields whose value is an arXiv ID: `arxiv:`, `eprint:`, and the metadata path INSPIRE stores it under. */
+const ARXIV_FIELDS = new Set(['arxiv', 'eprint', 'arxiv_eprints.value']);
+
+/** The short operators that take an arXiv ID after a space (`eprint 1207.7214`). */
+const ARXIV_OPERATORS = new Set(['arxiv', 'eprint']);
+
+/** One arXiv clause sent without its version suffix: the clause as the caller wrote it and as sent. */
+interface ArxivVersionRewrite {
+  sent: string;
+  written: string;
+}
+
+/** What the scan expects next: a new clause, an arXiv value, another field's value, or neither. */
+type Expecting = 'clause' | 'arxivValue' | 'otherValue' | 'none';
+
+const isSpace = (char: string) => /\s/.test(char);
+
+/**
+ * Removes the version suffix (`v2` or `V2`) from every arXiv ID a literature query
+ * gives as an arXiv clause value, since INSPIRE indexes arXiv IDs without one:
+ * `arxiv:ID`, `eprint:ID`, and `arxiv_eprints.value:ID` (quoted, `arXiv:`-prefixed,
+ * or after a space), `arxiv ID` and `eprint ID` at a clause start, and a bare ID at
+ * a clause start (the query start, or after `(`, `and`, `or`, `not`). The values of
+ * other fields stay as written: `refersto:` and `citedby:` (which select by recid),
+ * title words, and a group given as a field's value; so do quoted phrases, regex
+ * values, URLs, and DOIs. One pass over quote- and regex-aware tokens, not a parser.
+ */
+export function unversionArxivIds(query: string): {
+  query: string;
+  rewrites: ArxivVersionRewrite[];
+} {
+  const edits: {
+    clauseStart: number;
+    clauseEnd: number;
+    id: string;
+    start: number;
+    end: number;
+  }[] = [];
+  let expecting: Expecting = 'clause';
+  let operatorStart = 0;
+  let skipDepth = 0;
+  let first = true;
+
+  /** Strips the ID in `[start, end)`: exactly, or (as a clause value) also quoted or `arXiv:`-prefixed. */
+  const rewrite = (clauseStart: number, start: number, end: number, asValue: boolean) => {
+    let idStart = start;
+    let idEnd = end;
+    if (asValue) {
+      const quote = query[start];
+      if ((quote === '"' || quote === "'") && end - start >= 2 && query[end - 1] === quote) {
+        idStart++;
+        idEnd--;
+      } else if (query.slice(start, start + 6).toLowerCase() === 'arxiv:') {
+        idStart += 6;
+      }
+    }
+    const written = query.slice(idStart, idEnd);
+    const id = stripArxivVersion(written);
+    if (id !== written) edits.push({ clauseStart, clauseEnd: end, id, start: idStart, end: idEnd });
+  };
+
+  /** Advances the clause state over one token; `colon` is its first colon outside quotes, or -1. */
+  const step = (start: number, end: number, colon: number) => {
+    const text = query.slice(start, end);
+    const isFirst = first;
+    first = false;
+    if (skipDepth > 0) {
+      if (text === '(') skipDepth++;
+      else if (text === ')' && --skipDepth === 0) expecting = 'none';
+      return;
+    }
+    if (text === '(') {
+      // A group given as another field's value (`t:(…)`, `refersto:(…)`) is skipped whole.
+      if (expecting === 'otherValue') skipDepth = 1;
+      else {
+        const before = query.charAt(start - 1);
+        const opens = start === 0 || before === '(' || isSpace(before);
+        expecting = expecting === 'arxivValue' || opens ? 'clause' : 'none';
+      }
+      return;
+    }
+    if (text === ')') {
+      expecting = 'none';
+      return;
+    }
+    const word = text.toLowerCase();
+    if (word === 'and' || word === 'or' || word === 'not') {
+      // `not` after a field negates its value (`a: not Witten`); otherwise a clause follows.
+      if (word !== 'not' || expecting === 'clause' || expecting === 'none') expecting = 'clause';
+      return;
+    }
+    if (colon >= 0) {
+      const field = query.slice(start, colon).toLowerCase();
+      if (expecting === 'otherValue') expecting = 'none';
+      else if (colon + 1 === end) {
+        operatorStart = start;
+        expecting = ARXIV_FIELDS.has(field) ? 'arxivValue' : 'otherValue';
+      } else {
+        if (ARXIV_FIELDS.has(field)) {
+          rewrite(expecting === 'arxivValue' ? operatorStart : start, colon + 1, end, true);
+        }
+        expecting = 'none';
+      }
+      return;
+    }
+    if (expecting === 'arxivValue') {
+      rewrite(operatorStart, start, end, true);
+      expecting = 'none';
+    } else if (expecting === 'otherValue') {
+      expecting = 'none';
+    } else if (expecting === 'none') {
+      if (QUERY_FIELDS.has(word)) expecting = 'otherValue';
+    } else if (ARXIV_OPERATORS.has(word)) {
+      operatorStart = start;
+      expecting = 'arxivValue';
+    } else if (isFirst && (word === 'find' || word === 'f')) {
+      // SPIRES-style `find eprint …`: the clause follows.
+    } else if (QUERY_FIELDS.has(word)) {
+      expecting = 'otherValue';
+    } else {
+      rewrite(start, start, end, false);
+      expecting = 'none';
+    }
+  };
+
+  let i = 0;
+  while (i < query.length) {
+    const char = query.charAt(i);
+    if (isSpace(char)) {
+      i++;
+      continue;
+    }
+    if (char === '(' || char === ')') {
+      step(i, i + 1, -1);
+      i++;
+      continue;
+    }
+    const start = i;
+    let colon = -1;
+    while (i < query.length) {
+      const c = query.charAt(i);
+      if (c === '(' || c === ')' || isSpace(c)) break;
+      if (c === '"' || c === "'" || (c === '/' && (i === start || query[i - 1] === ':'))) {
+        for (i++; i < query.length && query[i] !== c; i++) {
+          if (query[i] === '\\') i++;
+        }
+        i++;
+      } else {
+        if (c === ':' && colon < 0) colon = i;
+        i++;
+      }
+    }
+    i = Math.min(i, query.length);
+    step(start, i, colon);
+  }
+
+  if (edits.length === 0) return { query, rewrites: [] };
+  const parts: string[] = [];
+  let last = 0;
+  for (const edit of edits) {
+    parts.push(query.slice(last, edit.start), edit.id);
+    last = edit.end;
+  }
+  parts.push(query.slice(last));
+  return {
+    query: parts.join(''),
+    rewrites: edits.map((edit) => ({
+      written: query.slice(edit.clauseStart, edit.clauseEnd),
+      sent: `${query.slice(edit.clauseStart, edit.start)}${edit.id}${query.slice(edit.end, edit.clauseEnd)}`,
+    })),
+  };
+}
+
+/** The notice naming each clause `unversionArxivIds` rewrote, as written and as sent; `undefined` for none. */
+export function arxivVersionNotice(rewrites: readonly ArxivVersionRewrite[]): string | undefined {
+  if (rewrites.length === 0) return;
+  const pairs = rewrites.map(
+    ({ written, sent }) => `"${callerEcho(written)}" sent as "${callerEcho(sent)}"`,
+  );
+  return `INSPIRE indexes arXiv IDs without a version suffix, so the suffix was removed: ${pairs.join('; ')}.`;
 }
 
 /**

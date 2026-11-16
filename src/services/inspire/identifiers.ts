@@ -1,6 +1,7 @@
 /**
  * @fileoverview Paper and author identifier handling for INSPIRE: the one-to-one
- * normalizations the tool schemas run in their preprocess, the paper pattern
+ * normalizations the tool schemas run in their preprocess, the arXiv version
+ * strip they share with the literature query rewrite, the paper pattern
  * their refinement checks (kept out of the advertised JSON Schema), the HEPData
  * record numbers a paper input can name instead of a paper, and the
  * classification that routes an identifier to the INSPIRE query form that
@@ -20,6 +21,18 @@ const DOI = /^10\.\d{4,9}\/[^\s*?]+$/;
 /** A normalized paper identifier: recid, new or old arXiv ID, or DOI without `*` or `?`. */
 export const PAPER_ID_PATTERN =
   /^(?:\d{1,9}|\d{4}\.\d{4,5}|[a-z-]+(?:\.[A-Z]{2})?\/\d{7}|10\.\d{4,9}\/[^\s*?]+)$/;
+
+/** A whole new- or old-style arXiv ID with a version suffix, in any case (`1207.7214V2`, `HEP-TH/9711200v3`). */
+const VERSIONED_ARXIV = /^(\d{4}\.\d{4,5}|[a-z-]+(?:\.[a-z]{2})?\/\d{7})v\d+$/i;
+
+/**
+ * The arXiv ID without its version suffix (`v2` or `V2`), the rest kept as
+ * written; any other string, a prefixed or embedded ID included, unchanged.
+ * INSPIRE indexes arXiv IDs without a version, so `1207.7214v2` matches nothing.
+ */
+export function stripArxivVersion(id: string): string {
+  return id.replace(VERSIONED_ARXIV, '$1');
+}
 
 /** A numbered hepdata.net record page, scheme optional; the `ins<recid>` form is a paper and is mapped instead. */
 const HEPDATA_RECORD_URL = /^(?:https?:\/\/)?(?:www\.)?hepdata\.net\/record\/(\d+)\/?(?:[?#].*)?$/i;
@@ -46,11 +59,10 @@ export function hepdataRecordNumber(id: string): string | undefined {
  * maps arxiv.org, doi.org, inspirehep.net literature, and hepdata.net
  * `record/ins<recid>` URLs to the identifier they carry (a numbered
  * `record/<n>` URL names a HEPData record, not a paper, and is not mapped), strips `arXiv:` / `doi:` prefixes (and any space after them) and HEPData's
- * `ins` prefix, lower-cases an old-style arXiv archive (`HEP-TH/9711200` →
- * `hep-th/9711200`, the subject class of `math.AG/0601001` kept as written), and
- * drops an arXiv version suffix (INSPIRE matches `1207.7214`, not `1207.7214v2`).
- * Every mapping is one-to-one; anything else passes through for the pattern
- * refinement to reject.
+ * `ins` prefix, drops an arXiv version suffix in either case (`stripArxivVersion`),
+ * and lower-cases an old-style arXiv archive (`HEP-TH/9711200` → `hep-th/9711200`,
+ * the subject class of `math.AG/0601001` kept as written). Every mapping is
+ * one-to-one; anything else passes through for the pattern refinement to reject.
  */
 export function normalizePaperId(raw: string): string {
   let id = raw.trim();
@@ -67,11 +79,8 @@ export function normalizePaperId(raw: string): string {
   );
   id = id.replace(/^https?:\/\/(?:www\.)?hepdata\.net\/record\/ins(\d+)\/?(?:[?#].*)?$/i, '$1');
   id = id.replace(/^ins(\d+)$/i, '$1');
-  id = id.replace(/^[A-Za-z-]+(?=(?:\.[A-Za-z]{2})?\/\d{7}(?:v\d+)?$)/, (archive) =>
-    archive.toLowerCase(),
-  );
-  id = id.replace(/^(\d{4}\.\d{4,5})v\d+$/, '$1');
-  id = id.replace(/^([a-z-]+(?:\.[A-Z]{2})?\/\d{7})v\d+$/, '$1');
+  id = stripArxivVersion(id);
+  id = id.replace(/^[A-Za-z-]+(?=(?:\.[A-Za-z]{2})?\/\d{7}$)/, (archive) => archive.toLowerCase());
   return id;
 }
 
@@ -134,6 +143,20 @@ export function routeAuthorQuery(query: string): AuthorRoute {
   if (BAI.test(query)) return { matchedAs: 'bai', q: `ids.value:${query}` };
   if (RECID.test(query)) return { matchedAs: 'recid', q: `control_number:${query}` };
   return { matchedAs: 'name', q: query };
+}
+
+/** True when a search query is a recid: one to nine digits, nothing else. */
+export function isRecid(query: string): boolean {
+  return RECID.test(query);
+}
+
+/**
+ * The `q` for an experiment or institution search: a query of digits only is a
+ * recid (`control_number:N`; digits as free text match nothing), anything else is
+ * sent as written.
+ */
+export function recidOrTextQuery(query: string): string {
+  return isRecid(query) ? `control_number:${query}` : query;
 }
 
 /** True when the text carries an ORCID-shaped token (literature queries never match one). */

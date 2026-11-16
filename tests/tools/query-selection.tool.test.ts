@@ -1,21 +1,31 @@
 /**
- * @fileoverview Query selection contracts shared by literature tools.
+ * @fileoverview Query selection contracts shared by the tools that send a caller
+ * query: query characterization, empty recognized clauses (the literature tools
+ * and the HEPData search), the arXiv version-suffix rewrite on every request of
+ * a literature call, export filters, and reference-fallback verification.
  * @module tests/tools/query-selection.tool.test
  */
 import { runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { exportCitationsTool } from '@/mcp-server/tools/definitions/export-citations.tool.js';
 import { getCitationSummaryTool } from '@/mcp-server/tools/definitions/get-citation-summary.tool.js';
+import { getPaperTool } from '@/mcp-server/tools/definitions/get-paper.tool.js';
+import { searchHepdataTool } from '@/mcp-server/tools/definitions/search-hepdata.tool.js';
 import { searchLiteratureTool } from '@/mcp-server/tools/definitions/search-literature.tool.js';
 import {
   BIBTEX_ENTRIES,
   badRequestBody,
+  dataPage,
+  dossierMetadata,
+  emptyBody,
   exportBody,
+  facetResponder,
   jsonResponse,
   literatureMetadata,
   literaturePage,
   pagedLiterature,
   textResponse,
+  zeroCitationSummaryBody,
 } from '../fixtures/inspire-upstream.js';
 import { type ServiceHarness, startHarness, stopHarness } from '../fixtures/service-harness.js';
 import { errorEnvelope, fullText, structured } from '../fixtures/tool-result.js';
@@ -53,6 +63,19 @@ const validQueries = [
   'citedby:recid:1124337',
 ];
 
+/** arXiv-shaped text that is not an arXiv clause value: sent as written, with no rewrite notice. */
+const unrewrittenArxivForms = [
+  'arxiv:1207.7214',
+  'refersto:arxiv:1207.7214v2',
+  'citedby:arxiv:1207.7214v2',
+  'refersto arxiv:1207.7214v2',
+  't "arxiv:1207.7214v2"',
+  't 1207.7214v2',
+  'arxiv:/1207\\.7214v2/',
+  'https://arxiv.org/abs/1207.7214v2',
+  'doi:10.48550/arXiv.1207.7214v2',
+];
+
 describe('query characterization', () => {
   it.each(validQueries)('forwards legitimate syntax unchanged: %s', async (query) => {
     h.route('/literature', jsonResponse(literaturePage()));
@@ -60,10 +83,26 @@ describe('query characterization', () => {
     expect(result.isError).toBeFalsy();
     expect(h.requests[0]?.params.get('q')).toBe(query);
   });
+
+  it.each(unrewrittenArxivForms)(
+    'forwards %s unchanged, with no version notice on either surface',
+    async (query) => {
+      h.route('/literature', jsonResponse(literaturePage()));
+      const result = await runToolContract(searchLiteratureTool, { query });
+      expect(structured<{ notice?: string }>(result).notice ?? '').not.toContain('version');
+      expect(fullText(result)).not.toContain('version suffix');
+      expect(h.requests[0]?.params.get('q')).toBe(query);
+    },
+  );
 });
 
 describe('empty recognized clauses', () => {
-  for (const definition of [searchLiteratureTool, getCitationSummaryTool, exportCitationsTool]) {
+  for (const [definition, example] of [
+    [searchLiteratureTool, 'a Witten'],
+    [getCitationSummaryTool, 'a Witten'],
+    [exportCitationsTool, 'a Witten'],
+    [searchHepdataTool, 't higgs'],
+  ] as const) {
     it.each([
       'a:',
       '(a:)',
@@ -77,18 +116,233 @@ describe('empty recognized clauses', () => {
       'a: " "',
       'a:("")',
       'a: not ""',
+      't:',
+      'k:',
+      'cn:',
+      'date:',
+      'refersto:',
+      'a: and arxiv:1207.7214v2',
     ])(`${definition.name} rejects %s before requests`, async (query) => {
       h.route('/literature', jsonResponse(badRequestBody(), { status: 400 }));
       h.route('/literature/facets', jsonResponse(badRequestBody(), { status: 400 }));
+      h.route('/data', jsonResponse(badRequestBody(), { status: 400 }));
       const result = await runToolContract(definition, { query });
       expect(h.requests).toHaveLength(0);
       const error = errorEnvelope(result);
       expect(error.data?.reason).toBe('invalid_query');
-      expect(error.data?.recovery?.hint).toContain('a Witten');
+      expect(error.data?.recovery?.hint).toContain(example);
       expect(fullText(result)).toContain(error.data?.recovery?.hint);
       expect(h.requests).toHaveLength(0);
     });
   }
+
+  it.each([
+    'collaborations.value:LHCb',
+    'keywords.value:"Inclusive"',
+    'literature.control_number:1797621',
+    'dois.value:"10.17182/hepdata.98625"',
+    'top pair differential cross section 13 TeV',
+    ...validQueries,
+  ])('cern_inspire_search_hepdata forwards %s to the data collection unchanged', async (query) => {
+    h.route('/data', jsonResponse(dataPage()));
+    const result = await runToolContract(searchHepdataTool, { query });
+    expect(result.isError).toBeFalsy();
+    expect(h.requests).toHaveLength(1);
+    expect(h.requests[0]?.path).toBe('/api/data');
+    expect(h.requests[0]?.params.get('q')).toBe(query);
+  });
+});
+
+describe('arXiv version suffixes', () => {
+  const notice = (pairs: [string, string][]) =>
+    `INSPIRE indexes arXiv IDs without a version suffix, so the suffix was removed: ${pairs
+      .map(([written, sent]) => `"${written}" sent as "${sent}"`)
+      .join('; ')}.`;
+
+  /** Answers a literature search, a citation export, and the `fields=control_number` count. */
+  const literatureResponder = (request: Request) => {
+    const params = new URL(request.url).searchParams;
+    if (params.has('format')) return textResponse(exportBody(BIBTEX_ENTRIES.slice(0, 1)));
+    return jsonResponse(
+      params.get('fields') === 'control_number'
+        ? literaturePage([{ control_number: 1124337, document_type: ['article'] }])
+        : literaturePage(),
+    );
+  };
+
+  const nested = '(cn atlas and eprint 1207.7214v12) or not arxiv:hep-th/9711200V3';
+  const nestedSent = '(cn atlas and eprint 1207.7214) or not arxiv:hep-th/9711200';
+  const nestedNotice = notice([
+    ['eprint 1207.7214v12', 'eprint 1207.7214'],
+    ['arxiv:hep-th/9711200V3', 'arxiv:hep-th/9711200'],
+  ]);
+
+  for (const definition of [searchLiteratureTool, exportCitationsTool, getCitationSummaryTool]) {
+    it(`${definition.name} sends unrewritten arXiv text as written, with no version notice`, async () => {
+      const query = 'refersto:arxiv:1207.7214v2 and arxiv:1207.7214';
+      h.route('/literature', literatureResponder);
+      h.route('/literature/facets', facetResponder());
+      const result = await runToolContract(definition, { query, year_to: 2026 });
+      expect(structured<{ notice?: string }>(result).notice ?? '').not.toContain('version');
+      expect(fullText(result)).not.toContain('version suffix');
+      expect(h.requests.length).toBeGreaterThan(0);
+      expect(h.requests.every((request) => request.params.get('q') === query)).toBe(true);
+    });
+
+    it(`${definition.name} sends the unversioned IDs on every request and names each rewrite on both surfaces`, async () => {
+      h.route('/literature', literatureResponder);
+      h.route('/literature/facets', facetResponder());
+      const result = await runToolContract(definition, {
+        query: nested,
+        document_types: ['published'],
+      });
+      const output = structured<{ notice?: string; effectiveQuery?: string }>(result);
+      expect(output.notice).toContain(nestedNotice);
+      expect(fullText(result)).toContain(nestedNotice);
+      expect(h.requests).toHaveLength(2);
+      expect(h.requests.map((request) => request.params.get('q'))).toEqual([
+        nestedSent,
+        nestedSent,
+      ]);
+    });
+
+    it(`${definition.name} rejects an empty clause beside a versioned ID before any request`, async () => {
+      const result = await runToolContract(definition, { query: 'a: and arxiv:1207.7214v2' });
+      expect(errorEnvelope(result).data?.reason).toBe('invalid_query');
+      expect(h.requests).toHaveLength(0);
+    });
+  }
+
+  it('cern_inspire_search_literature keeps the size-reduction and paging notices beside the rewrite', async () => {
+    h.route('/literature', jsonResponse(literaturePage([literatureMetadata()], { next: true })));
+    const result = await runToolContract(searchLiteratureTool, {
+      query: 'arxiv:1207.7214v2',
+      size: 101,
+    });
+    const text = structured<{ notice?: string }>(result).notice ?? '';
+    const expected = notice([['arxiv:1207.7214v2', 'arxiv:1207.7214']]);
+    expect(text).toBe(
+      `More results: request page 2 with size 100. size 101 reduced to 100. ${expected}`,
+    );
+    expect(fullText(result)).toContain(expected);
+    expect(h.requests[0]?.params.get('q')).toBe('arxiv:1207.7214');
+  });
+
+  it('cern_inspire_search_literature names the query it sent when nothing matched', async () => {
+    h.route('/literature', jsonResponse(emptyBody()));
+    const result = await runToolContract(searchLiteratureTool, { query: 'eprint 1207.7214v2' });
+    const text = structured<{ notice?: string }>(result).notice ?? '';
+    expect(text).toContain(notice([['eprint 1207.7214v2', 'eprint 1207.7214']]));
+    expect(text).toContain('No INSPIRE literature matched "eprint 1207.7214".');
+    expect(fullText(result)).toContain('No INSPIRE literature matched "eprint 1207.7214".');
+  });
+
+  it('cern_inspire_export_citations names the query it sent when nothing matched', async () => {
+    h.route('/literature', textResponse(''));
+    const result = await runToolContract(exportCitationsTool, { query: 'eprint 1207.7214v2' });
+    const text = structured<{ notice?: string }>(result).notice ?? '';
+    expect(text).toContain(notice([['eprint 1207.7214v2', 'eprint 1207.7214']]));
+    expect(text).toContain('No INSPIRE literature matched "eprint 1207.7214";');
+    expect(fullText(result)).toContain('No INSPIRE literature matched "eprint 1207.7214";');
+  });
+
+  it.each([1, 2])(
+    'cern_inspire_export_citations sends the named-paper OR list unversioned on page %i, count request included',
+    async (page) => {
+      h.route('/literature', pagedLiterature(['Maldacena:1997re', 'ATLAS:2012yve']));
+      const result = await runToolContract(exportCitationsTool, {
+        query: 'recid:451647 or arxiv:1207.7214v2',
+        page,
+        size: 1,
+      });
+      const output = structured<{ entries: { texkey: string }[]; notice?: string }>(result);
+      expect(output.entries.map((entry) => entry.texkey)).toEqual([
+        page === 1 ? 'Maldacena:1997re' : 'ATLAS:2012yve',
+      ]);
+      const expected = notice([['arxiv:1207.7214v2', 'arxiv:1207.7214']]);
+      expect(output.notice).toContain(expected);
+      expect(fullText(result)).toContain(expected);
+      if (page === 1) expect(output.notice).toContain('request page 2 with size 1');
+      expect(h.requests).toHaveLength(page);
+      for (const request of h.requests) {
+        expect(request.params.get('q')).toBe('recid:451647 or arxiv:1207.7214');
+      }
+    },
+  );
+
+  it('cern_inspire_export_citations keeps the past-the-end notice beside the rewrite', async () => {
+    h.route('/literature', pagedLiterature(['Maldacena:1997re', 'ATLAS:2012yve']));
+    const result = await runToolContract(exportCitationsTool, {
+      query: 'recid:451647 or 1207.7214V2',
+      page: 5,
+      size: 1,
+    });
+    const output = structured<{ entries: unknown[]; notice?: string }>(result);
+    expect(output.entries).toEqual([]);
+    expect(output.notice).toBe(
+      `${notice([['1207.7214V2', '1207.7214']])} Page 5 is past the last page (2); request a lower page.`,
+    );
+    expect(fullText(result)).toContain(output.notice);
+  });
+
+  it('cern_inspire_get_citation_summary sends both facet requests unversioned and echoes the sent query as effectiveQuery and target.query', async () => {
+    h.route('/literature/facets', facetResponder());
+    const query = '(a Witten or arxiv:hep-th/9711200v3) and not t review';
+    const sent = '(a Witten or arxiv:hep-th/9711200) and not t review';
+    const result = await runToolContract(getCitationSummaryTool, { query });
+    const output = structured<{
+      effectiveQuery: string;
+      notice?: string;
+      target: { query: string };
+    }>(result);
+    const expected = notice([['arxiv:hep-th/9711200v3', 'arxiv:hep-th/9711200']]);
+    expect(output.effectiveQuery).toBe(sent);
+    expect(output.target.query).toBe(sent);
+    expect(output.notice).toBe(expected);
+    expect(fullText(result)).toContain(`**Query:** ${sent}`);
+    expect(fullText(result)).toContain(`Query: ${sent}`);
+    expect(fullText(result)).toContain(expected);
+    expect(h.requests.map((request) => request.params.get('facet_name')).sort()).toEqual([
+      'citation-summary',
+      'citations-by-year',
+    ]);
+    expect(h.requests.every((request) => request.params.get('q') === sent)).toBe(true);
+  });
+
+  it('cern_inspire_get_citation_summary keeps the zero-summary notice beside the rewrite', async () => {
+    h.route('/literature/facets', facetResponder({ summary: zeroCitationSummaryBody() }));
+    const result = await runToolContract(getCitationSummaryTool, { query: 'arxiv:1207.7214v2' });
+    const output = structured<{ notice?: string }>(result);
+    expect(output.notice).toContain(notice([['arxiv:1207.7214v2', 'arxiv:1207.7214']]));
+    expect(output.notice).toContain('No citeable papers matched');
+    expect(fullText(result)).toContain(output.notice);
+  });
+
+  it.each(['arxiv:1207.7214v2', 'eprint 1207.7214V2', '1207.7214v2'])(
+    'cern_inspire_search_hepdata sends %s as written, with no version notice',
+    async (query) => {
+      h.route('/data', jsonResponse(dataPage()));
+      const result = await runToolContract(searchHepdataTool, { query });
+      expect(result.isError).toBeFalsy();
+      expect(fullText(result)).not.toContain('version suffix');
+      expect(h.requests.map((request) => request.params.get('q'))).toEqual([query]);
+    },
+  );
+
+  it('cern_inspire_get_paper resolves an upper-case V version suffix as the bare ID', async () => {
+    h.route(
+      '/literature',
+      jsonResponse(
+        literaturePage([literatureMetadata({ arxiv_eprints: [{ value: '1207.7214' }] })]),
+      ),
+      { once: true },
+    );
+    h.route('/literature', jsonResponse(literaturePage([dossierMetadata(3)])));
+    h.route('/data', jsonResponse(dataPage()));
+    const result = await runToolContract(getPaperTool, { paper: '1207.7214V2' });
+    expect(structured<{ resolvedAs: string }>(result).resolvedAs).toBe('arxiv');
+    expect(h.requests[0]?.params.get('q')).toBe('arxiv:1207.7214');
+  });
 });
 
 describe('export filters', () => {

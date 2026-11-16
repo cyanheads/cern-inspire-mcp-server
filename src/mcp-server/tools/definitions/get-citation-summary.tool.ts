@@ -9,12 +9,14 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import {
+  arxivVersionNotice,
   authorIdInput,
   blankAsUnset,
   documentTypesInput,
   formatAppliedFilters,
   hasEmptyQueryField,
   subjectsInput,
+  unversionArxivIds,
   yearFromInput,
   yearToInput,
 } from '@/mcp-server/tools/inputs.js';
@@ -72,14 +74,9 @@ const bucketsSchema = (scope: string) =>
 type Totals = z.infer<ReturnType<typeof totalsSchema>>;
 type Buckets = z.infer<ReturnType<typeof bucketsSchema>>;
 
-/** A float average shown to two decimals; integers print unchanged. */
-const average = (value: number) => Number(value.toFixed(2));
-
+/** One totals row; the average prints unrounded, the value structuredContent carries. */
 function renderTotals(label: string, t: Totals): string {
-  const avg =
-    t.averageCitations === undefined
-      ? 'Not available (no papers)'
-      : String(average(t.averageCitations));
+  const avg = t.averageCitations ?? 'Not available (no papers)';
   return `| ${label} | ${t.papers} | ${t.citations} | ${avg} |`;
 }
 
@@ -105,7 +102,7 @@ export const getCitationSummaryTool = tool('cern_inspire_get_citation_summary', 
   input: z.object({
     author: authorIdInput,
     query: blankAsUnset(z.string().trim().max(1000).optional()).describe(
-      'An INSPIRE literature query, e.g. "collaboration:atlas", "t neutrino oscillation", "a Edward.Witten.1", or "affid:902725" for an institution\'s papers (CERN; affid takes the institution recid that cern_inspire_search_authors and cern_inspire_search_experiments return). Empty recognized field clauses such as a: or a:"" (including whitespace-only quoted values) are invalid; other syntax is passed through without complete grammar validation. Literature queries do not match ORCIDs; pass an ORCID as author. Pass this or author, not both.',
+      'An INSPIRE literature query, e.g. "collaboration:atlas", "t neutrino oscillation", "a Edward.Witten.1", or "affid:902725" for an institution\'s papers (CERN; resolve an institution name to the recid affid takes with cern_inspire_search_institutions, whose literatureQuery is this clause, and join a department\'s and its university\'s with or). Empty recognized field clauses such as a: or a:"" (including whitespace-only quoted values) are invalid; other syntax is passed through without complete grammar validation. Literature queries do not match ORCIDs; pass an ORCID as author. Pass this or author, not both.',
     ),
     document_types: documentTypesInput,
     subjects: subjectsInput,
@@ -177,7 +174,7 @@ export const getCitationSummaryTool = tool('cern_inspire_get_citation_summary', 
       .string()
       .optional()
       .describe(
-        'Guidance when no citeable paper matched, or when citations per year were left out or could not be read.',
+        'Guidance when an arXiv clause was sent without its version suffix, when no citeable paper matched, or when citations per year were left out or could not be read.',
       ),
   },
   enrichmentTrailer: {
@@ -296,6 +293,7 @@ export const getCitationSummaryTool = tool('cern_inspire_get_citation_summary', 
       );
     }
 
+    const sent = unversionArxivIds(input.query ?? '');
     const inspire = getInspireService();
     const call = inspire.beginCall(ctx);
 
@@ -329,7 +327,7 @@ export const getCitationSummaryTool = tool('cern_inspire_get_citation_summary', 
         query: `authors.recid:${resolved.recid}`,
       };
     } else {
-      target = { kind: 'query', query: input.query ?? '' };
+      target = { kind: 'query', query: sent.query };
     }
     ctx.enrich.echo(target.query);
 
@@ -344,7 +342,7 @@ export const getCitationSummaryTool = tool('cern_inspire_get_citation_summary', 
       citationsByYear: series.status,
     });
 
-    const notices: string[] = [];
+    const notices = [arxivVersionNotice(sent.rewrites)].filter((notice) => notice !== undefined);
     if (summary.citeablePapers === 0) {
       notices.push(
         'No citeable papers matched; the summary is all zeros. Check the query with cern_inspire_search_literature first.',

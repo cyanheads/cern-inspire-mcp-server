@@ -9,12 +9,15 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { blankAsUnset } from '@/mcp-server/tools/inputs.js';
+import {
+  blankAsUnset,
+  hasEmptyQueryField,
+  moreResultsNotice,
+  pastLastPageNotice,
+  RESULT_WINDOW,
+} from '@/mcp-server/tools/inputs.js';
 import { getInspireService } from '@/services/inspire/inspire-service.js';
 import { callerEcho, identifier, inline, printUrl, quote } from '@/utils/render.js';
-
-/** INSPIRE serves at most this many results of one query (`page × size`). */
-const RESULT_WINDOW = 10_000;
 
 const SORTS = ['relevance', 'mostrecent'] as const;
 
@@ -124,7 +127,7 @@ export const searchHepdataTool = tool('cern_inspire_search_hepdata', {
       .min(1)
       .max(1000)
       .describe(
-        'Free text or INSPIRE syntax over HEPData records, e.g. top pair differential cross section 13 TeV; collaborations.value:LHCb; keywords.value:"Inclusive"; or literature.control_number:<recid> for one paper\'s data. INSPIRE does not reject malformed syntax; see cern_inspire_list_reference topic search_syntax.',
+        'Free text or INSPIRE syntax over HEPData records, e.g. top pair differential cross section 13 TeV; collaborations.value:LHCb; keywords.value:"Inclusive"; or literature.control_number:<recid> for one paper\'s data. Empty recognized field clauses such as t: or a:"" are invalid; other syntax is passed to INSPIRE without complete grammar validation. See cern_inspire_list_reference topic search_syntax.',
       ),
     sort: blankAsUnset(z.enum(SORTS).default('relevance')).describe(
       'Result order: relevance (default) or mostrecent.',
@@ -153,7 +156,7 @@ export const searchHepdataTool = tool('cern_inspire_search_hepdata', {
       .number()
       .optional()
       .describe(
-        'The page number to request next, when one exists within the 10,000-result window.',
+        'The page number to request next, with the same size, when one exists within the 10,000-result window.',
       ),
     notice: z.string().optional().describe('Guidance on an empty or paged result.'),
   },
@@ -172,9 +175,9 @@ export const searchHepdataTool = tool('cern_inspire_search_hepdata', {
     {
       reason: 'invalid_query',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'INSPIRE answered 400 to a parameter value it refuses.',
+      when: 'A recognized field clause has no value, or INSPIRE answered 400 to a parameter value it refuses.',
       recovery:
-        'Check the query against cern_inspire_list_reference topic search_syntax, then retry cern_inspire_search_hepdata with corrected values.',
+        'Give every field a value (for example "t higgs"), check cern_inspire_list_reference topic search_syntax, then retry cern_inspire_search_hepdata.',
       severity: 'notice',
       thrownBy: 'service',
     },
@@ -213,6 +216,13 @@ export const searchHepdataTool = tool('cern_inspire_search_hepdata', {
     ctx.enrich({ truncated: false, shown: 0, cap: input.size });
     ctx.enrich.total(0);
 
+    // The data collection runs INSPIRE's literature query parser, which reads an empty clause as free text.
+    if (hasEmptyQueryField(input.query)) {
+      throw ctx.fail(
+        'invalid_query',
+        'A recognized INSPIRE field clause has no value; use "t higgs", for example.',
+      );
+    }
     if (input.page * input.size > RESULT_WINDOW) {
       throw ctx.fail(
         'beyond_result_window',
@@ -238,7 +248,7 @@ export const searchHepdataTool = tool('cern_inspire_search_hepdata', {
     if (result.records.length === 0) {
       notices.push(
         result.total > 0
-          ? `Page ${input.page} is past the last page (${Math.ceil(result.total / input.size)}); request a lower page.`
+          ? pastLastPageNotice(input.page, result.total, input.size)
           : `No HEPData record matched "${callerEcho(input.query)}". HEPData keywords use phrases like "Inclusive", "Differential Cross Section", and reactions like "P P --> TOP TOPBAR X"; try fewer words or a collaborations.value:NAME clause, or find the paper with cern_inspire_search_literature.`,
       );
     }
@@ -249,7 +259,7 @@ export const searchHepdataTool = tool('cern_inspire_search_hepdata', {
       if (reachable) ctx.enrich({ nextPage });
       notices.unshift(
         reachable
-          ? `More results: request page ${nextPage} for the next ${input.size}.`
+          ? moreResultsNotice(nextPage, 'size', input.size)
           : 'INSPIRE serves only the first 10,000 results of a query; narrow it with tighter terms, a collaboration, or an energy to reach the rest.',
       );
       ctx.enrich.truncated({

@@ -893,18 +893,29 @@ describe('the summary and format() parity', () => {
     expect(bodyText(result)).not.toContain('Citation range');
   });
 
-  it('shows averages to two decimals in content[] and keeps the float in structuredContent', async () => {
-    const body = summary((aggregation) => {
-      const all = aggregation.citations?.buckets?.all;
-      if (all) all.average_citations = { value: 12.3456 };
-    });
-    routeSummary(body);
+  it.each([
+    [44.21492537313433, '44.21492537313433'],
+    [12.3456, '12.3456'],
+    [0.3333333333333333, '0.3333333333333333'],
+    [12, '12'],
+  ])(
+    'prints average %d in content[] exactly as structuredContent carries it, for both scopes',
+    async (value, printed) => {
+      const body = summary((aggregation) => {
+        const sets = aggregation.citations?.buckets;
+        if (sets?.all) sets.all.average_citations = { value };
+        if (sets?.published) sets.published.average_citations = { value };
+      });
+      routeSummary(body);
 
-    const result = await run({ query: 'x' });
+      const result = await run({ query: 'x' });
 
-    expect(structured<Output>(result).all.averageCitations).toBe(12.3456);
-    expect(bodyText(result)).toContain('| All citeable | 413 | 202121 | 12.35 |');
-  });
+      const out = structured<Output>(result);
+      expect([out.all.averageCitations, out.published.averageCitations]).toEqual([value, value]);
+      expect(bodyText(result)).toContain(`| All citeable | 413 | 202121 | ${printed} |`);
+      expect(bodyText(result)).toContain(`| Published | 320 | 189652 | ${printed} |`);
+    },
+  );
 
   it('rounds a float citation total to an integer', async () => {
     const body = summary((aggregation) => {

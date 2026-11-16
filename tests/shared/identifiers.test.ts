@@ -1,6 +1,7 @@
 /**
  * @fileoverview Tests for the paper and author identifier helpers: every URL and
- * prefix form `normalizePaperId` reduces, what `classifyPaperId` accepts and
+ * prefix form `normalizePaperId` reduces, the arXiv version strip it shares with
+ * the literature query rewrite, what `classifyPaperId` accepts and
  * refuses, the HEPData record numbers `hepdataRecordNumber` reads, the author
  * normalizations, and the author query routing.
  * @module tests/shared/identifiers.test
@@ -17,6 +18,7 @@ import {
   PAPER_ID_PATTERN,
   paperIdKey,
   routeAuthorQuery,
+  stripArxivVersion,
 } from '@/services/inspire/identifiers.js';
 
 const DOI = '10.1016/j.physletb.2012.08.020';
@@ -100,8 +102,15 @@ describe('normalizePaperId', () => {
     expect(classifyPaperId(normalizePaperId(input))).toBeUndefined();
   });
 
-  it('keeps an upper-case V as part of the string (only a lower-case vN suffix is a version)', () => {
-    expect(normalizePaperId('1207.7214V2')).toBe('1207.7214V2');
+  it.each([
+    ['1207.7214V2', '1207.7214'],
+    ['arXiv:1207.7214V12', '1207.7214'],
+    ['hep-th/9711200V3', 'hep-th/9711200'],
+    ['arXiv:HEP-TH/9711200V3', 'hep-th/9711200'],
+    ['Math.AG/0601001V1', 'math.AG/0601001'],
+    ['https://arxiv.org/abs/1207.7214V2', '1207.7214'],
+  ])('drops an upper-case V version suffix as well: %j → %j', (input, expected) => {
+    expect(normalizePaperId(input)).toBe(expected);
   });
 
   it('classifies an upper-case old-style arXiv ID as arxiv once normalized', () => {
@@ -117,7 +126,9 @@ describe('normalizePaperId', () => {
   it('is idempotent on every normalized form', () => {
     for (const input of [
       'HEP-TH/9711200v2',
+      'HEP-TH/9711200V2',
       '1207.7214v2',
+      '1207.7214V2',
       'https://arxiv.org/pdf/hep-th/9711200v2.pdf',
       `doi:https://doi.org/${DOI}`,
       'https://www.hepdata.net/record/ins1124337',
@@ -126,6 +137,41 @@ describe('normalizePaperId', () => {
       const once = normalizePaperId(input);
       expect(normalizePaperId(once)).toBe(once);
     }
+  });
+});
+
+describe('stripArxivVersion', () => {
+  it.each([
+    ['1207.7214v2', '1207.7214'],
+    ['1207.7214V2', '1207.7214'],
+    ['1207.7214v12', '1207.7214'],
+    ['2412.20242v1', '2412.20242'],
+    ['0704.0001v3', '0704.0001'],
+    ['hep-th/9711200v3', 'hep-th/9711200'],
+    ['HEP-TH/9711200V3', 'HEP-TH/9711200'],
+    ['math.AG/0601001v2', 'math.AG/0601001'],
+  ])('strips the version from %j, keeping the rest as written: %j', (id, expected) => {
+    expect(stripArxivVersion(id)).toBe(expected);
+  });
+
+  it.each([
+    '1207.7214',
+    'hep-th/9711200',
+    '1207.7214v',
+    '1207.7214v2x',
+    '1207.72v2',
+    '12077.214v2',
+    'x1207.7214v2',
+    '1207.7214v2 ',
+    'arXiv:1207.7214v2',
+    '10.48550/arXiv.1207.7214v2',
+    'https://arxiv.org/abs/1207.7214v2',
+    'hep-th/971120v3',
+    '451647',
+    'v2',
+    '',
+  ])('leaves %j unchanged: only a whole versioned arXiv ID loses its suffix', (text) => {
+    expect(stripArxivVersion(text)).toBe(text);
   });
 });
 

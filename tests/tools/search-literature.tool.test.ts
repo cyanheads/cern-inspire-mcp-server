@@ -111,7 +111,7 @@ describe('input', () => {
       expect(out.notice).toContain('size 101 reduced to 100.');
       expect(fullText(result)).toContain('size 101 reduced to 100.');
       expect(bodyText(result)).toContain('**Size:** 100');
-      if (hasMore) expect(out.notice).toContain('request page 2 for the next 100');
+      if (hasMore) expect(out.notice).toContain('request page 2 with size 100');
     },
   );
 
@@ -544,10 +544,10 @@ describe('required enrichment', () => {
       cap: 10,
       totalCount: 250,
       nextPage: 2,
-      notice: 'More results: request page 2 for the next 10.',
+      notice: 'More results: request page 2 with size 10.',
     });
     expect(fullText(result)).toContain('**Next page:** 2');
-    expect(fullText(result)).toContain('More results: request page 2 for the next 10.');
+    expect(fullText(result)).toContain('More results: request page 2 with size 10.');
   });
 
   it('counts the next page from the requested page', async () => {
@@ -556,8 +556,27 @@ describe('required enrichment', () => {
     const out = structured<Output>(await run({ query: 't higgs', page: 7, size: 5 }));
 
     expect(out.nextPage).toBe(8);
-    expect(out.notice).toBe('More results: request page 8 for the next 5.');
+    expect(out.notice).toBe('More results: request page 8 with size 5.');
     expect(params()?.get('page')).toBe('7');
+  });
+
+  it('names the size in the next-page notice, so sending exactly what it says keeps size 25 rather than the default 10', async () => {
+    routePage(pageOf(25, { next: true, total: 900 }));
+
+    const result = await run({ query: 't higgs', size: 25 });
+    const recipe = /request page (\d+) with size (\d+)\./.exec(
+      structured<Output>(result).notice ?? '',
+    );
+    await run({ query: 't higgs', page: Number(recipe?.[1]), size: Number(recipe?.[2]) });
+
+    expect(recipe?.slice(1)).toEqual(['2', '25']);
+    expect(fullText(result)).toContain(recipe?.[0]);
+    const pageRequests = h.requests.filter((r) => r.params.has('page'));
+    expect(pageRequests.map((r) => [r.params.get('page'), r.params.get('size')])).toEqual([
+      ['1', '25'],
+      ['2', '25'],
+    ]);
+    expect(searchLiteratureTool.enrichment?.nextPage?.description).toContain('same size');
   });
 
   it('offers the last reachable next page at the 10,000-result window edge', async () => {
@@ -566,7 +585,7 @@ describe('required enrichment', () => {
     const out = structured<Output>(await run({ query: 't higgs', page: 99, size: 100 }));
 
     expect(out.nextPage).toBe(100);
-    expect(out.notice).toBe('More results: request page 100 for the next 100.');
+    expect(out.notice).toBe('More results: request page 100 with size 100.');
   });
 
   it('withholds the next page when it would cross the window and says to narrow the query', async () => {
@@ -819,7 +838,7 @@ describe('broad-match notice', () => {
     expect(out.nextPage).toBe(2);
     expect(
       out.notice?.startsWith(
-        'More results: request page 2 for the next 10. This query matched 1,500,000',
+        'More results: request page 2 with size 10. This query matched 1,500,000',
       ),
     ).toBe(true);
   });

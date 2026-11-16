@@ -1,7 +1,8 @@
 /**
  * @fileoverview Tests for cern_inspire_search_hepdata through `runToolContract`
  * over an `InspireService` on a fake fetch: input validation and blank-as-unset
- * handling, request mapping, the 10,000-result window contract, the required
+ * handling, request mapping, the empty-field-clause and 10,000-result window
+ * contracts, the required
  * enrichment on a zero-result page, an under-cap page, and capped pages, the
  * zero-hit and past-the-end notices, the HEPData fields derived from INSPIRE's
  * `data` collection (`recordDoi`, `hepdataRecid`, `latestVersion`, `tableCount`,
@@ -121,7 +122,7 @@ describe('input', () => {
       expect(out.notice).toContain('size 51 reduced to 50.');
       expect(fullText(result)).toContain('size 51 reduced to 50.');
       expect(bodyText(result)).toContain('**Size:** 50');
-      if (hasMore) expect(out.notice).toContain('request page 2 for the next 50');
+      if (hasMore) expect(out.notice).toContain('request page 2 with size 50');
     },
   );
 
@@ -321,6 +322,35 @@ describe('declared error contracts', () => {
     expect(hint('upstream_unreadable')).toContain('cern_inspire_search_hepdata');
   });
 
+  it('declares invalid_query for an empty recognized field clause as well as a 400, with a value example to retry', () => {
+    const entry = errors.find((e) => e.reason === 'invalid_query');
+    expect(entry?.when).toBe(
+      'A recognized field clause has no value, or INSPIRE answered 400 to a parameter value it refuses.',
+    );
+    expect(entry?.recovery).toBe(
+      'Give every field a value (for example "t higgs"), check cern_inspire_list_reference topic search_syntax, then retry cern_inspire_search_hepdata.',
+    );
+    expect(searchHepdataTool.input.shape.query.description).toContain(
+      'Empty recognized field clauses such as t: or a:"" are invalid',
+    );
+  });
+
+  it('fails an empty field clause as invalid_query before any request, with the recovery on both surfaces', async () => {
+    routePage();
+
+    const result = await run({ query: 'a: and t higgs', size: 1 });
+
+    const error = errorEnvelope(result);
+    expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(error.data?.reason).toBe('invalid_query');
+    expect(error.message).toBe(
+      'A recognized INSPIRE field clause has no value; use "t higgs", for example.',
+    );
+    expect(error.data?.recovery?.hint).toBe(hint('invalid_query'));
+    expect(fullText(result)).toContain(`Recovery: ${hint('invalid_query')}`);
+    expect(h.requests).toHaveLength(0);
+  });
+
   it('routes an unreadable body to a later retry of the same page and size, never a smaller size that shifts the page', () => {
     expect(hint('upstream_unreadable')).toBe(
       'Retry this call in a few seconds; if it fails again, INSPIRE is likely serving an error page, so wait a minute before retrying cern_inspire_search_hepdata with the same page and size.',
@@ -454,10 +484,10 @@ describe('required enrichment', () => {
       cap: 10,
       totalCount: 250,
       nextPage: 2,
-      notice: 'More results: request page 2 for the next 10.',
+      notice: 'More results: request page 2 with size 10.',
     });
     expect(fullText(result)).toContain('**Next page:** 2');
-    expect(fullText(result)).toContain('More results: request page 2 for the next 10.');
+    expect(fullText(result)).toContain('More results: request page 2 with size 10.');
     expect(bodyText(result)).toContain('**More pages:** yes');
   });
 
@@ -467,8 +497,26 @@ describe('required enrichment', () => {
     const out = structured<Output>(await run({ query: 'top pair', page: 7, size: 5 }));
 
     expect(out.nextPage).toBe(8);
-    expect(out.notice).toBe('More results: request page 8 for the next 5.');
+    expect(out.notice).toBe('More results: request page 8 with size 5.');
     expect(params()?.get('page')).toBe('7');
+  });
+
+  it('names the size in the next-page notice, so sending exactly what it says keeps size 25 rather than the default 10', async () => {
+    routePage(pageOf(25, { next: true, total: 900 }));
+
+    const result = await run({ query: 'top pair', size: 25 });
+    const recipe = /request page (\d+) with size (\d+)\./.exec(
+      structured<Output>(result).notice ?? '',
+    );
+    await run({ query: 'top pair', page: Number(recipe?.[1]), size: Number(recipe?.[2]) });
+
+    expect(recipe?.slice(1)).toEqual(['2', '25']);
+    expect(fullText(result)).toContain(recipe?.[0]);
+    expect(h.requests.map((r) => [r.params.get('page'), r.params.get('size')])).toEqual([
+      ['1', '25'],
+      ['2', '25'],
+    ]);
+    expect(searchHepdataTool.enrichment?.nextPage?.description).toContain('same size');
   });
 
   it('offers the last reachable next page at the 10,000-result window edge', async () => {
@@ -477,7 +525,7 @@ describe('required enrichment', () => {
     const out = structured<Output>(await run({ query: 'top pair', page: 199, size: 50 }));
 
     expect(out.nextPage).toBe(200);
-    expect(out.notice).toBe('More results: request page 200 for the next 50.');
+    expect(out.notice).toBe('More results: request page 200 with size 50.');
   });
 
   it('withholds the next page when it would cross the window and says to narrow the query', async () => {

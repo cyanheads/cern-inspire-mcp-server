@@ -8,11 +8,15 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import {
+  arxivVersionNotice,
   blankAsUnset,
   documentTypesInput,
   formatAppliedFilters,
   hasEmptyQueryField,
+  pastLastPageNotice,
+  RESULT_WINDOW,
   subjectsInput,
+  unversionArxivIds,
   yearFromInput,
   yearToInput,
 } from '@/mcp-server/tools/inputs.js';
@@ -24,9 +28,6 @@ const SORTS = ['relevance', 'mostrecent', 'mostcited'] as const;
 
 /** Upper bound on `size`. */
 const MAX_ENTRIES = 50;
-
-/** INSPIRE serves at most this many results of one query (`page × size`). */
-const RESULT_WINDOW = 10_000;
 
 export const exportCitationsTool = tool('cern_inspire_export_citations', {
   title: 'Export INSPIRE citations',
@@ -59,7 +60,7 @@ export const exportCitationsTool = tool('cern_inspire_export_citations', {
       'Entries per page (positive integer, default 10; above 50 uses 50).',
     ),
   }),
-  // The sibling top-N tools (search_authors, search_experiments) call their cap `limit`.
+  // The sibling top-N tools (search_authors, search_experiments, search_institutions) call their cap `limit`.
   inputAliases: { limit: 'size' },
   output: z.object({
     format: z.enum(FORMATS).describe('The entry format returned.'),
@@ -88,13 +89,13 @@ export const exportCitationsTool = tool('cern_inspire_export_citations', {
       .number()
       .optional()
       .describe(
-        'The page number to request next, when more papers follow within the 10,000-result window.',
+        'The page number to request next, with the same size, when more papers follow within the 10,000-result window.',
       ),
     notice: z
       .string()
       .optional()
       .describe(
-        'Guidance when size was reduced, nothing matched, the page is past the last or came back empty inside the match count, or more papers follow.',
+        'Guidance when size was reduced, an arXiv clause was sent without its version suffix, nothing matched, the page is past the last or came back empty inside the match count, or more papers follow.',
       ),
   },
   enrichmentTrailer: {
@@ -197,10 +198,11 @@ export const exportCitationsTool = tool('cern_inspire_export_citations', {
       );
     }
 
+    const sent = unversionArxivIds(input.query);
     const inspire = getInspireService();
     const result = await inspire.exportCitations(
       {
-        query: input.query,
+        query: sent.query,
         format: input.format,
         sort: input.sort,
         page: input.page,
@@ -219,9 +221,11 @@ export const exportCitationsTool = tool('cern_inspire_export_citations', {
       truncated: result.truncated,
     });
 
-    const notices: string[] = reduction ? [reduction] : [];
+    const notices = [reduction, arxivVersionNotice(sent.rewrites)].filter(
+      (notice) => notice !== undefined,
+    );
     if (shown === 0) {
-      notices.push(emptyPageNotice(input, result.total));
+      notices.push(emptyPageNotice({ ...input, query: sent.query }, result.total));
     }
 
     if (result.truncated) {
@@ -231,9 +235,9 @@ export const exportCitationsTool = tool('cern_inspire_export_citations', {
       notices.unshift(
         !reachable
           ? 'INSPIRE serves only the first 10,000 results of a query; narrow it with tighter terms, such as a date range or a collaboration, to export the rest.'
-          : `More papers matched; request page ${nextPage} for the next ${input.size}${
+          : `More papers matched; request page ${nextPage} with size ${input.size}${
               input.page === 1 && input.size < MAX_ENTRIES
-                ? `, or raise size (up to ${MAX_ENTRIES}) to export more per call`
+                ? `, or page 1 with a larger size (up to ${MAX_ENTRIES}) to export more per call`
                 : ''
             }.`,
       );
@@ -275,9 +279,8 @@ function emptyPageNotice(
   if (total === undefined || total === 0) {
     return `No INSPIRE literature matched "${callerEcho(input.query)}"; find the papers with cern_inspire_search_literature, then export by recid ("recid:N or recid:M").`;
   }
-  const lastPage = Math.ceil(total / input.size);
   if ((input.page - 1) * input.size >= total) {
-    return `Page ${input.page} is past the last page (${lastPage}); request a lower page.`;
+    return pastLastPageNotice(input.page, total, input.size);
   }
-  return `Page ${input.page} came back empty although INSPIRE counts ${total} matches (${lastPage} pages at this size); retry this call in a few seconds.`;
+  return `Page ${input.page} came back empty although INSPIRE counts ${total} matches (${Math.ceil(total / input.size)} pages at this size); retry this call in a few seconds.`;
 }
