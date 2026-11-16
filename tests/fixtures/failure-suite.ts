@@ -145,6 +145,26 @@ export function describeFailureClasses(options: FailureSuiteOptions): void {
       expect(h.requests).toHaveLength(0);
     });
 
+    // The message's own "retry after N s." is not the term: the closing line reads "· retry after N".
+    it('names the 429 wait among the closing content[] terms', async () => {
+      options.install(h, rateLimitResponse('120'));
+
+      expect(fullText(await run())).toMatch(/ · retry after 120(?: · |\))/);
+    });
+
+    it('names the pacer_shed wait among the closing content[] terms', async () => {
+      h = startHarness({
+        pacer: createPacer({ name: 'test', limits: [{ requests: 1, perMs: 60_000 }] }),
+      });
+      await h.pacer.run(async () => undefined);
+
+      const result = await run();
+
+      const wait = errorEnvelope(result).data?.retryAfter;
+      expect(wait).toBeGreaterThan(0);
+      expect(fullText(result)).toMatch(new RegExp(` · retry after ${wait}(?: · |\\))`));
+    });
+
     it.each(options.unreadable)('reports %s as upstream_unreadable', async (_label, reply) => {
       options.install(h, reply);
 
@@ -192,6 +212,17 @@ export function describeFailureClasses(options: FailureSuiteOptions): void {
         expect(error.data?.status).toBe(status);
       },
     );
+
+    it('keeps an upstream error body off both client surfaces', async () => {
+      options.install(h, new Response('upstream trouble', { status: 500 }));
+
+      const result = await run();
+
+      const error = errorEnvelope(result);
+      expect(error.data).not.toHaveProperty('body');
+      expect(error.data).not.toHaveProperty('responseBody');
+      expect(JSON.stringify(result)).not.toContain('upstream trouble');
+    });
 
     it.each([
       [404, JsonRpcErrorCode.NotFound],

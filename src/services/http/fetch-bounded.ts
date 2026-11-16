@@ -41,7 +41,7 @@ export interface BoundedResponse {
  * Fetches `url` once and reads the body under `maxBytes`.
  *
  * - Status on `accept` → `{ status, headers, text }`.
- * - Any other status → the `McpError` `httpErrorFromResponse` classifies (body captured, URL omitted).
+ * - Any other status → the `McpError` `httpErrorFromResponse` classifies (body captured for the server's logs, kept off client envelopes; URL omitted).
  * - Body over `maxBytes` (Content-Length checked first) → `ServiceUnavailable`, `reason: 'upstream_unreadable'`.
  * - Caller signal fired → its reason, rethrown unchanged (never retried).
  * - Per-attempt timeout fired → `Timeout` (retried by the caller's retry layer).
