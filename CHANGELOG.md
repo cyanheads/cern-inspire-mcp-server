@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.0](changelog/0.3.x/0.3.0.md) — 2026-11-15
+
+Add cern_inspire_search_institutions, page past the first 25 author and experiment matches, return thesis supervisors, thesis details and conference links in paper dossiers, and drop arXiv version suffixes from literature queries.
+
 ## [0.2.0](changelog/0.2.x/0.2.0.md) — 2026-10-26 · ⚠️ Breaking
 
 Verify INSPIRE literature selections and return richer paper records with contributor roles and public document links.

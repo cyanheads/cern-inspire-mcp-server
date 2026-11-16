@@ -1,6 +1,6 @@
 # cern-inspire-mcp-server - Directory Structure
 
-Generated on: 2026-10-26 18:02:26
+Generated on: 2026-11-16 01:42:20
 
 ```text
 cern-inspire-mcp-server/
@@ -26,6 +26,7 @@ cern-inspire-mcp-server/
 ├── changelog/
 │   ├── 0.1.x/
 │   ├── 0.2.x/
+│   ├── 0.3.x/
 │   └── template.md
 ├── docs/
 │   └── design.md
@@ -155,6 +156,7 @@ cern-inspire-mcp-server/
 │   │       │   ├── search-authors.tool.ts
 │   │       │   ├── search-experiments.tool.ts
 │   │       │   ├── search-hepdata.tool.ts
+│   │       │   ├── search-institutions.tool.ts
 │   │       │   └── search-literature.tool.ts
 │   │       └── inputs.ts
 │   ├── services/
@@ -206,6 +208,7 @@ cern-inspire-mcp-server/
 │       ├── search-authors.tool.test.ts
 │       ├── search-experiments.tool.test.ts
 │       ├── search-hepdata.tool.test.ts
+│       ├── search-institutions.tool.test.ts
 │       └── search-literature.tool.test.ts
 ├── .dockerignore
 ├── .env.example
@@ -217,6 +220,7 @@ cern-inspire-mcp-server/
 ├── bun.lock
 ├── bunfig.toml
 ├── CHANGELOG.md
+├── CITATION.cff
 ├── CLAUDE.md
 ├── devcheck.config.json
 ├── Dockerfile
