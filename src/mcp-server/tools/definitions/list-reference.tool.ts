@@ -113,12 +113,14 @@ const REFERENCE: Record<Topic, Entry[]> = {
     },
     {
       term: 'refersto:recid:N',
-      meaning: 'Papers that cite record N (its citations).',
+      meaning:
+        'Papers that cite record N (its citations). Takes a recid only: an arXiv value selects a different set. cern_inspire_get_paper returns this query for a paper as citingQuery.',
       example: 'refersto:recid:1124337',
     },
     {
       term: 'citedby:recid:N',
-      meaning: 'Papers that record N cites (its references).',
+      meaning:
+        'Papers that record N cites (its references). Takes a recid only: an arXiv value selects a different set. cern_inspire_get_paper returns this query for a paper as referencesQuery.',
       example: 'citedby:recid:1124337',
     },
     {
@@ -126,10 +128,17 @@ const REFERENCE: Record<Topic, Entry[]> = {
       meaning: 'Journal publication; the volume and page are optional.',
       example: 'j Phys.Lett.B,716,1',
     },
+    {
+      term: 'publication_info.cnum:CNUM',
+      meaning:
+        "A conference's contributions, by the conference number (CNUM) cern_inspire_get_paper reports in publications[].cnum. Spell out the field path: cnum CNUM and cnum:CNUM match nothing.",
+      example: 'publication_info.cnum:C22-07-06.1',
+    },
     { term: 'eprint ID', meaning: 'arXiv eprint number.', example: 'eprint 1207.7214' },
     {
       term: 'arxiv:ID',
-      meaning: 'arXiv ID, new or old style, without a version suffix (v2 matches nothing).',
+      meaning:
+        'arXiv ID, new or old style. INSPIRE indexes it without a version, so the query of cern_inspire_search_literature, cern_inspire_export_citations, and cern_inspire_get_citation_summary removes a vN suffix before sending and names the rewrite in a notice.',
       example: 'arxiv:hep-th/9711200',
     },
     {
@@ -151,13 +160,13 @@ const REFERENCE: Record<Topic, Entry[]> = {
     {
       term: 'aff NAME',
       meaning:
-        'Papers with an author whose affiliation INSPIRE records under that institution name: its curated short name, such as CERN, not the affiliation text printed on the paper; case-insensitive. affid:N is more complete.',
+        'Papers with an author whose affiliation INSPIRE records under that institution name: its curated short name, such as CERN, not the affiliation text printed on the paper; case-insensitive. cern_inspire_search_institutions returns that name as legacyIcn. affid:N is more complete.',
       example: 'aff CERN',
     },
     {
       term: 'affid:N',
       meaning:
-        "Papers linked to institution record N through an author's or supervisor's affiliation, a thesis institution, or a record-level affiliation. N is the institution recid cern_inspire_search_authors (institutionRecid) and cern_inspire_search_experiments (institutions[].recid) return; as the query of cern_inspire_get_citation_summary it gives the institution's citation summary.",
+        "Papers linked to institution record N through an author's or supervisor's affiliation, a thesis institution, or a record-level affiliation. N is the institution recid cern_inspire_search_institutions finds by name (recid, with this query as literatureQuery), and cern_inspire_search_authors (institutionRecid) and cern_inspire_search_experiments (institutions[].recid) return. It matches record N alone, not its departments or parent institution: join several with or. As the query of cern_inspire_get_citation_summary it gives the institution's citation summary.",
       example: 'affid:902725',
     },
     {
@@ -173,7 +182,7 @@ const REFERENCE: Record<Topic, Entry[]> = {
     {
       term: '10,000-result window',
       meaning:
-        'INSPIRE serves at most the first 10,000 results of a query (page × size ≤ 10,000); narrow the query to reach further.',
+        'INSPIRE serves at most the first 10,000 results of a query: page × size, or page × limit in cern_inspire_search_authors, cern_inspire_search_experiments, and cern_inspire_search_institutions, may not exceed 10,000. Narrow the query to reach further.',
     },
     {
       term: 'document_types / subjects filters',
@@ -190,13 +199,13 @@ const REFERENCE: Record<Topic, Entry[]> = {
     {
       term: 'recid',
       meaning:
-        'INSPIRE record ID, an integer. Literature, authors, experiments, and institutions each number their own records.',
+        'INSPIRE record ID, an integer. Literature, authors, experiments, institutions, and conferences each number their own records.',
       example: '1124337',
     },
     {
       term: 'arXiv ID',
       meaning:
-        "New style NNNN.NNNNN or old style archive/NNNNNNN. INSPIRE stores it without a version suffix: the paper input of cern_inspire_get_paper strips 'arXiv:', vN, and arxiv.org URLs, but a literature query needs the bare ID (arxiv:1207.7214, not 1207.7214v2).",
+        "New style NNNN.NNNNN or old style archive/NNNNNNN. INSPIRE stores it without a version suffix: the paper input of cern_inspire_get_paper strips 'arXiv:', vN (either case), and arxiv.org URLs, and cern_inspire_search_literature, cern_inspire_export_citations, and cern_inspire_get_citation_summary send an arXiv clause's ID without its vN, with a notice. refersto: and citedby: values are sent as written.",
       example: '1207.7214',
     },
     {
@@ -236,8 +245,14 @@ const REFERENCE: Record<Topic, Entry[]> = {
     {
       term: 'institution recid',
       meaning:
-        "An institution's recid, as institutionRecid (cern_inspire_search_authors) and institutions[].recid (cern_inspire_search_experiments) return it; select its papers with affid:N in cern_inspire_search_literature or cern_inspire_get_citation_summary.",
+        "An institution's recid: cern_inspire_search_institutions finds it from a name, and institutionRecid (cern_inspire_search_authors), institutions[].recid (cern_inspire_search_experiments), and thesis.institutions[].recid (cern_inspire_get_paper) return it; select its papers with affid:N in cern_inspire_search_literature or cern_inspire_get_citation_summary.",
       example: '902725',
+    },
+    {
+      term: 'institution legacy ICN',
+      meaning:
+        'The name INSPIRE records for an institution on papers: what authors[].affiliations in cern_inspire_get_paper and legacyIcn in cern_inspire_search_institutions carry, and what aff NAME matches. legacy_ICN:"NAME" as the query of cern_inspire_search_institutions finds its record, exact and case-sensitive, one name per call.',
+      example: 'Tokyo U.',
     },
     {
       term: 'texkey',

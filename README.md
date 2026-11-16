@@ -1,7 +1,7 @@
 <div align="center">
   <h1>@cyanheads/cern-inspire-mcp-server</h1>
   <p><b>Search INSPIRE-HEP papers, authors, experiments, HEPData records; get citation metrics and BibTeX via MCP. STDIO or Streamable HTTP.</b>
-  <div>8 Tools • 1 Literature Resource Template • 1 Agent Skill</div>
+  <div>9 Tools • 1 Literature Resource Template • 1 Agent Skill</div>
   </p>
 </div>
 
@@ -29,7 +29,7 @@
 
 ## Overview
 
-High-energy-physics literature from INSPIRE-HEP and the HEPData tables behind it. Search papers, authors, and experiments, compute citation summaries and h-indices, export BibTeX or LaTeX, and find the record holding a paper's numerical data.
+High-energy-physics literature from INSPIRE-HEP and the HEPData tables behind it. Search papers, authors, experiments, and institutions, compute citation summaries and h-indices, export BibTeX or LaTeX, and find the record holding a paper's numerical data.
 
 ### Tools
 
@@ -41,6 +41,7 @@ High-energy-physics literature from INSPIRE-HEP and the HEPData tables behind it
 | `cern_inspire_search_authors` | Find physicist profiles by name, BAI, ORCID, INSPIRE ID, or author recid |
 | `cern_inspire_get_citation_summary` | h-index, citation totals, citation buckets, and citations per year for one author or any literature query |
 | `cern_inspire_search_experiments` | Find experiments, collaborations, and facilities, with a query that selects their papers |
+| `cern_inspire_search_institutions` | Find institutions by name, exact recorded name, or recid, with the `affid:N` query that selects their papers |
 | `cern_inspire_search_hepdata` | Find HEPData measurement records by process, observable, energy, or collaboration |
 | `cern_inspire_list_reference` | Decode query syntax, identifier forms, filter values, citation buckets, and HEPData DOIs |
 
@@ -69,7 +70,8 @@ The same record is reachable through `cern_inspire_get_paper` for clients that d
 ### `cern_inspire_get_paper` <sub>tool</sub>
 
 - `paper` takes a recid, arXiv ID, DOI, inspirehep.net literature URL, or HEPData `ins<recid>` / hepdata.net `record/ins<recid>` URL; `resolvedAs` names the form that matched, and a miss fails as `paper_not_found`. A merged recid returns the surviving record, with `mergedFrom` naming the recid asked for
-- `max_authors` (default 25, capped at 500) and `author_offset` (default 0) page through contributors; pass `nextAuthorOffset` to continue. Entries retain recorded `roles` (such as editor or supervisor); an absent role stays unknown. `authorCount` retains INSPIRE's count, falling back to the available contributor-list length
+- `max_authors` (default 25, capped at 500) and `author_offset` (default 0) page through contributors; pass `nextAuthorOffset` to continue. Entries retain recorded `roles` (such as editor); an absent role stays unknown, and thesis supervisors arrive in `supervisors`. `authorCount` retains INSPIRE's count, falling back to the available contributor-list length
+- Thesis records add `supervisors` (every supervisor, not paged) and `thesis` (degree type, granting institutions with recids, defense date, date); `publications` entries add `cnum`, `conferenceRecid`, and `parentRecid`
 - `documents` lists public attached-document URLs with recorded filename, description, material, and full-text status; hidden and URL-less entries are omitted. Files are not downloaded. External `urls` remain separate; `citingQuery` and `referencesQuery` feed `cern_inspire_search_literature`
 - `hepdata.status` is `available`, `none`, or `lookup_failed`, with `recordDoi`, `latestVersion`, `tableCount`, and `hepdataUrl` when available; extra HEPData records appear in `hepdata.otherRecords`
 
@@ -85,7 +87,7 @@ The same record is reachable through `cern_inspire_get_paper` for clients that d
 
 ### `cern_inspire_search_authors` <sub>tool</sub>
 
-- A name or one identifier (BAI, ORCID, INSPIRE ID, author recid); positive integer `limit` (default 5, clamped to 25)
+- A name or one identifier (BAI, ORCID, INSPIRE ID, author recid); `page` (default 1) and a positive integer `limit` per page (default 5, clamped to 25), within the 10,000-result window; `nextPage` continues while `hasMore`
 - `matchedAs` is `orcid`, `inspire_id`, `bai`, or `recid` (exact match), or `name` (free-text search returning ranked candidates to choose from)
 - Profiles carry `recid`, `bai`, ORCID, positions (with an `institutionRecid` that `affid:N` takes for the institution's papers), advisors, arXiv categories, awards, and a `literatureQuery` selecting the person's papers
 
@@ -102,8 +104,15 @@ The same record is reachable through `cern_inspire_get_paper` for clients that d
 
 ### `cern_inspire_search_experiments` <sub>tool</sub>
 
-- An experiment, collaboration, accelerator, or facility name, an INSPIRE legacy name (`CERN-LHC-CMS`), or an experiment recid (digits only); positive integer `limit` (default 5, clamped to 25)
+- An experiment, collaboration, accelerator, or facility name, an INSPIRE legacy name (`CERN-LHC-CMS`), or an experiment recid (digits only); `page` (default 1) and a positive integer `limit` per page (default 5, clamped to 25), within the 10,000-result window; `nextPage` continues while `hasMore`
 - Records carry the accelerator, host institutions, collaboration, lifecycle dates, `ongoing` (omitted when INSPIRE records neither state), INSPIRE's paper count, and a `literatureQuery` for `cern_inspire_search_literature` or `cern_inspire_get_citation_summary`
+
+---
+
+### `cern_inspire_search_institutions` <sub>tool</sub>
+
+- Institution name words (`University of Washington`), one exact recorded name as `legacy_ICN:"Tokyo U."` (case-sensitive, as a paper's affiliations print it), or an institution recid (digits only); positive integer `limit` (default 25, clamped to 25) and `page`, within the 10,000-result window
+- Records carry the recorded name, the hierarchy from unit to parent, institution types, cities and country codes, INSPIRE's paper count, parent, successor, and predecessor links, `inactive`, and an `affid:N` `literatureQuery` for `cern_inspire_search_literature` or `cern_inspire_get_citation_summary`; rows stay in INSPIRE's order, and a university's department records and its "(main)" record join with `or`
 
 ---
 
@@ -123,7 +132,7 @@ The same record is reachable through `cern_inspire_get_paper` for clients that d
 
 ### `inspire://literature/{recid}` <sub>resource</sub>
 
-- The `cern_inspire_get_paper` dossier as `application/json`, with the first 25 contributors, their recorded roles, and public attached-document links
+- The `cern_inspire_get_paper` dossier as `application/json`, with the first 25 contributors, their recorded roles, every thesis supervisor and the thesis details, and public attached-document links
 - Takes a recid only; use the tool for arXiv IDs, DOIs, or further contributor pages. A merged recid serves the surviving record, with `mergedFrom`
 
 ## Features
@@ -134,13 +143,13 @@ INSPIRE-specific:
 
 - Paces requests to 12 per 5 s, under INSPIRE's limit of 15, with a cooldown after a 429; a call that can't start in time fails as `pacer_shed` with a `retryAfter`
 - 55 s budget per tool call, including queue wait and up to 2 retries
-- Requests select only the fields a tool returns; author email addresses are never requested
-- Forgiving inputs: paper identifiers accept `arXiv:` / `doi:` prefixes, version suffixes, and arxiv.org, doi.org, or inspirehep.net URLs; author identifiers accept an orcid.org URL
+- Requests select only the fields a tool returns; author and supervisor email addresses are never requested
+- Forgiving inputs: paper identifiers accept `arXiv:` / `doi:` prefixes, version suffixes, and arxiv.org, doi.org, or inspirehep.net URLs; author identifiers accept an orcid.org URL; literature queries drop arXiv version suffixes (`arxiv:1207.7214v2` → `arxiv:1207.7214`), with a notice
 
 Agent-friendly output:
 
-- Positive integer result budgets above the ceiling succeed with a notice stating requested and effective values: literature 100, HEPData and citation export 50, author and experiment search 25. Defaults stay unchanged; zero, negative, and fractional budgets fail. Paging and the 10,000-result window use the effective size
-- Chainable identifiers: hits carry `recid`, author profiles and experiments carry a ready `literatureQuery`, and `cern_inspire_get_paper` returns `citingQuery` and `referencesQuery`
+- Positive integer result budgets above the ceiling succeed with a notice stating requested and effective values: literature 100, HEPData and citation export 50, author, experiment, and institution search 25. Defaults stay unchanged; zero, negative, and fractional budgets fail. Paging and the 10,000-result window use the effective size
+- Chainable identifiers: hits carry `recid`, author profiles, experiments, and institutions carry a ready `literatureQuery`, and `cern_inspire_get_paper` returns `citingQuery` and `referencesQuery`
 - Query echo and paging state: `totalCount`, `truncated` / `shown` / `cap`, `nextPage`, `appliedFilters`, and `effectiveQuery`, plus a `notice` with next-step text on empty, capped, or suspiciously broad results
 - Discriminated fields: `hepdata.status`, `resolvedAs`, `matchedAs`, and `target.kind` let callers branch on data; typed failure reasons (`paper_not_found`, `author_not_found`, `beyond_result_window`, `inspire_rate_limited`) each carry a recovery hint
 - No fabrication: a field INSPIRE leaves out stays absent and prints as "Not available" or "not recorded"
@@ -155,7 +164,7 @@ Agent-friendly output:
 ## Known limitations
 
 - **No HEPData table values.** hepdata.net's bot challenge refuses the server's User-Agent, so the server never calls it. `cern_inspire_get_paper` and `cern_inspire_search_hepdata` return the record DOI and the hepdata.net page where the values are read.
-- **Malformed INSPIRE syntax mostly doesn't fail.** Literature search, citation summaries, and citation export reject empty recognized field clauses (`a:`, `a: not`, or `a:""`, including whitespace-only quoted values) as `invalid_query`; give each field a value (`a Witten`). Otherwise an unparsed operator widens or empties the match; zero hits or a very large `totalCount` usually means a syntax slip (`cern_inspire_list_reference` topic `search_syntax`).
+- **Malformed INSPIRE syntax mostly doesn't fail.** Literature search, citation summaries, citation export, and HEPData search reject empty recognized field clauses (`a:`, `a: not`, or `a:""`, including whitespace-only quoted values) as `invalid_query`; give each field a value (`a Witten`). Otherwise an unparsed operator widens or empties the match; zero hits or a very large `totalCount` usually means a syntax slip (`cern_inspire_list_reference` topic `search_syntax`).
 - **Selection checks cost an extra request.** Literature search verifies filtered selections and later pages; export verifies filtered first pages and all later pages. This prevents INSPIRE's reference fallback from bypassing filters or repeating exhausted results. A required verification failure fails the call; unfiltered first pages keep one request
 - **10,000-result window.** Only the first 10,000 results of a query are reachable; narrow the query to reach the rest.
 - **Shared request queue.** All callers of one server process share one queue under INSPIRE's 15 requests per 5 s per address, so a burst can delay or shed other calls with a retryable rate-limit error.
@@ -210,7 +219,7 @@ See [`.env.example`](./.env.example) for the full list of framework overrides.
 
 ### Local development
 
-Requires [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+). INSPIRE-HEP's API is public and keyless.
+Requires [Bun v1.4.4](https://bun.sh/) or higher (or Node.js v24+). INSPIRE-HEP's API is public and keyless.
 
 ```sh
 git clone https://github.com/cyanheads/cern-inspire-mcp-server.git

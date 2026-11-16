@@ -4,22 +4,22 @@ description: Use cern_inspire_* tools for HEP literature research, author or ins
 license: Apache-2.0
 metadata:
   author: "cyanheads"
-  version: "1.0"
+  version: "1.1"
 ---
 
 ## Scope
 
-INSPIRE-HEP covers high-energy-physics literature, author profiles, experiments, and publication-level HEPData records through a keyless API. Numerical table values require the returned HEPData record page; this server cannot read them.
+INSPIRE-HEP covers high-energy-physics literature, author profiles, experiments, institutions, and publication-level HEPData records through a keyless API. Numerical table values require the returned HEPData record page; this server cannot read them.
 
 ## Identifiers
 
-Recids belong to separate collections. Keep each ID attached to its source: literature recids from `cern_inspire_search_literature` or `cern_inspire_get_paper`; author recids and BAIs from `cern_inspire_search_authors`; experiment queries from `cern_inspire_search_experiments`; institution recids from author positions or experiment institutions. A numeric paper ID is not an author or institution ID.
+Recids belong to separate collections. Keep each ID attached to its source: literature recids from `cern_inspire_search_literature` or `cern_inspire_get_paper`; author recids and BAIs from `cern_inspire_search_authors` or a dossier's `authors[]`/`supervisors[]`; experiment queries from `cern_inspire_search_experiments`; institution recids from `cern_inspire_search_institutions`, author positions, experiment institutions, or a dossier's `thesis.institutions[]`. A numeric paper ID is not an author or institution ID. A publication's `parentRecid` is a literature recid; `conferenceRecid` belongs to INSPIRE's conference collection.
 
-Reuse returned `literatureQuery` values for author and experiment cohorts. For institutions, build `affid:N` only from a returned institution recid. A HEPData record DOI identifies data, not the associated literature record; follow returned paper recids for the publication.
+Reuse returned `literatureQuery` values for author, experiment, and institution cohorts. For institutions, build `affid:N` only from a returned institution recid. A HEPData record DOI identifies data, not the associated literature record; follow returned paper recids for the publication.
 
 ## Gates
 
-1. Resolve a person's name before attributing papers or metrics. Compare candidate profiles' affiliations, categories, and identifiers; do not select the first namesake by rank. A missing ORCID match can mean the profile has no linked ORCID: search by name before concluding the person is absent.
+1. Resolve a person's name before attributing papers or metrics. Compare candidate profiles' affiliations, categories, and identifiers; do not select the first namesake by rank. A missing ORCID match can mean the profile has no linked ORCID: search by name before concluding the person is absent. Page on with `page` (follow `nextPage`) before concluding a namesake list lacks the person; once the surname-miss notice appears past page 1, later pages have left the queried surname, so pin the person by BAI, ORCID, or INSPIRE ID instead; extra name parts widen a name search.
 2. Inspect representative literature matches before summarizing or exporting a cohort. Check the effective query and applied filters. An unexpectedly broad or empty result can be malformed syntax despite a successful response; consult `cern_inspire_list_reference` before treating it as evidence. Multiple document types or subjects intersect; they do not form a union.
 3. Resolve an old paper ID with `cern_inspire_get_paper` before concluding a query has no matching paper, citations, or references. Merged IDs can match nothing in queries; use the surviving recid returned by the dossier.
 4. Distinguish papers published in a year range from citations received in that range. Summary year filters select the papers and leave out the yearly citation series. For citation-year questions, obtain the full series and select its returned year rows. An omitted series is unavailable, not zero; it counts citations over all matched records and need not sum to the citeable-paper total.
@@ -28,11 +28,11 @@ Reuse returned `literatureQuery` values for author and experiment cohorts. For i
 
 ## Core chain
 
-Resolve the paper, person, or experiment → inspect the selected literature cohort → retrieve dossiers, summarize citations, or export the verified set. Keep the same query and filters when carrying a cohort between tools.
+Resolve the paper, person, experiment, or institution → inspect the selected literature cohort → retrieve dossiers, summarize citations, or export the verified set. Keep the same query and filters when carrying a cohort between tools.
 
 ## Workflows
 
-**Author or institution analysis.** Resolve a person with `cern_inspire_search_authors`, inspect their returned literature query, then use `cern_inspire_get_citation_summary` for the selected profile. For an institution, use a linked institution recid with `affid:N`; this includes linked author/supervisor affiliations, thesis institutions, and record-level affiliations, so describe that scope rather than calling it an employee-only publication count. Compare like scopes: all citeable versus published, the same publication years, and the same self-citation treatment.
+**Author or institution analysis.** Resolve a person with `cern_inspire_search_authors`, inspect their returned literature query, then use `cern_inspire_get_citation_summary` for the selected profile. Resolve an institution with `cern_inspire_search_institutions`: free text returns candidates in INSPIRE's order, and a university's papers usually sit under department records whose parent is its "(main)" record. Choose by hierarchy, related records, and paper count, and page on before concluding a unit is absent. A name copied from a paper's affiliations finds its record exactly as `legacy_ICN:"NAME"`, one name per call. Each record's `affid:N` matches that record alone; join the department and main records you mean with `or`, and say which records the figures cover. `affid:N` includes linked author/supervisor affiliations, thesis institutions, and record-level affiliations, so describe that scope rather than calling it an employee-only publication count. Compare like scopes: all citeable versus published, the same publication years, and the same self-citation treatment.
 
 **Citation networks and bibliographies.** Start with `cern_inspire_get_paper` and reuse its ready-made queries for citing papers or references; the INSPIRE operators are easy to reverse (`refersto` finds citing papers, `citedby` finds references). Inspect the set with `cern_inspire_search_literature`, then call `cern_inspire_export_citations`. For a curated shortlist, export the selected literature recids joined with `or` instead of rerunning the broad discovery query. Keep query, filters, sort, and page size fixed during pagination, and preserve any coverage notices with the bibliography.
 
@@ -40,4 +40,4 @@ Resolve the paper, person, or experiment → inspect the selected literature coh
 
 ## References
 
-Call `cern_inspire_list_reference` for INSPIRE query syntax, identifier forms, document types, subjects, citation buckets, and HEPData version/DOI conventions. In particular, literature queries require unversioned arXiv IDs, and ORCIDs resolve through author tools rather than literature queries.
+Call `cern_inspire_list_reference` for INSPIRE query syntax, identifier forms, document types, subjects, citation buckets, and HEPData version/DOI conventions. In particular, literature queries drop an arXiv version suffix (and say so), `refersto:`/`citedby:` take recids, not arXiv IDs, and ORCIDs resolve through author tools rather than literature queries.

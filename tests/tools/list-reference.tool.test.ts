@@ -321,6 +321,114 @@ describe('affiliation queries', () => {
   });
 });
 
+describe('institution search routes', () => {
+  const meaningOf = async (topic: Topic, term: string) =>
+    (await run(topic)).output.entries.find((e) => e.term === term)?.meaning ?? '';
+
+  it('names cern_inspire_search_institutions in aff NAME, affid:N, and the institution recid', async () => {
+    expect(await meaningOf('search_syntax', 'aff NAME')).toContain(
+      'cern_inspire_search_institutions returns that name as legacyIcn.',
+    );
+    const affid = await meaningOf('search_syntax', 'affid:N');
+    expect(affid).toContain('cern_inspire_search_institutions finds by name');
+    expect(affid).toContain(
+      'It matches record N alone, not its departments or parent institution: join several with or.',
+    );
+    const recid = await meaningOf('identifiers', 'institution recid');
+    expect(recid).toContain('cern_inspire_search_institutions finds it from a name');
+    expect(recid).toContain('thesis.institutions[].recid (cern_inspire_get_paper)');
+  });
+
+  it('counts conferences and institutions among the record collections that number their own recids', async () => {
+    expect(await meaningOf('identifiers', 'recid')).toContain(
+      'Literature, authors, experiments, institutions, and conferences each number their own records.',
+    );
+  });
+
+  it('lists the institution legacy ICN with the exact-name query, on both surfaces', async () => {
+    const { output, text } = await run('identifiers');
+
+    const entry = output.entries.find((e) => e.term === 'institution legacy ICN');
+    expect(entry?.example).toBe('Tokyo U.');
+    expect(entry?.meaning).toContain('authors[].affiliations in cern_inspire_get_paper');
+    expect(entry?.meaning).toContain('legacy_ICN:"NAME"');
+    expect(entry?.meaning).toContain('exact and case-sensitive, one name per call');
+    expect(text).toContain('| `institution legacy ICN` |');
+    expect(text).toContain('`Tokyo U.`');
+  });
+
+  it('names the institution search under the 10,000-result window', async () => {
+    expect(await meaningOf('search_syntax', '10,000-result window')).toContain(
+      'cern_inspire_search_authors, cern_inspire_search_experiments, and cern_inspire_search_institutions',
+    );
+  });
+});
+
+describe('conference queries', () => {
+  it('lists publication_info.cnum:CNUM in search_syntax with the CNUM form get_paper reports, on both surfaces', async () => {
+    const { output, text } = await run('search_syntax');
+
+    const entry = output.entries.find((e) => e.term === 'publication_info.cnum:CNUM');
+    expect(entry).toMatchObject({ example: 'publication_info.cnum:C22-07-06.1' });
+    expect(entry?.meaning).toContain('publications[].cnum');
+    expect(entry?.meaning).toContain('cern_inspire_get_paper');
+    expect(entry?.meaning).toContain('cnum:CNUM');
+    expect(entry?.meaning).toMatch(/match nothing/);
+    expect(text).toContain('| `publication_info.cnum:CNUM` |');
+    expect(text).toContain('`publication_info.cnum:C22-07-06.1`');
+  });
+});
+
+describe('arXiv and citation-link queries', () => {
+  const entry = async (topic: Topic, term: string) => {
+    const { output, text } = await run(topic);
+    const found = output.entries.find((e) => e.term === term);
+    if (!found) throw new Error(`no entry ${topic}/${term}`);
+    expect(text).toContain(`| \`${cellText(term)}\` | ${cellText(found.meaning)} |`);
+    return found;
+  };
+
+  it.each([
+    ['refersto:recid:N', 'citingQuery'],
+    ['citedby:recid:N', 'referencesQuery'],
+  ])(
+    'says %s takes a recid only and routes to the get_paper %s, on both surfaces',
+    async (term, field) => {
+      const { meaning } = await entry('search_syntax', term);
+
+      expect(meaning).toContain('recid only');
+      expect(meaning).toMatch(/arXiv value selects a different set/);
+      expect(meaning).toContain(
+        `cern_inspire_get_paper returns this query for a paper as ${field}`,
+      );
+    },
+  );
+
+  it('says the literature tools send an arxiv: clause without its version suffix', async () => {
+    const { meaning, example } = await entry('search_syntax', 'arxiv:ID');
+
+    expect(meaning).not.toContain('matches nothing');
+    expect(meaning).toContain('removes a vN suffix');
+    expect(meaning).toContain('notice');
+    expect(example).toBe('arxiv:hep-th/9711200');
+  });
+
+  it('names the literature tools that strip vN in the arXiv identifier entry, and the values they leave alone', async () => {
+    const { meaning } = await entry('identifiers', 'arXiv ID');
+
+    expect(meaning).not.toContain('needs the bare ID');
+    for (const tool of [
+      'cern_inspire_search_literature',
+      'cern_inspire_export_citations',
+      'cern_inspire_get_citation_summary',
+      'cern_inspire_get_paper',
+    ]) {
+      expect(meaning).toContain(tool);
+    }
+    expect(meaning).toContain('refersto: and citedby:');
+  });
+});
+
 describe('format', () => {
   const render = (output: Parameters<NonNullable<typeof listReferenceTool.format>>[0]): string => {
     const block = listReferenceTool.format?.(output)[0];
